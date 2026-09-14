@@ -1,13 +1,12 @@
 import { createHash } from "node:crypto";
 import { extname } from "node:path";
+import ts from "typescript";
 import { estimateTokens } from "../review/patch.js";
 import { CHUNKER_VERSION, type ContextChunk } from "./types.js";
+
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
-const SYMBOL =
-  /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|class|interface|type|enum|const|let|var)\s+([A-Za-z_$][\w$]*)/;
-const IMPORT =
-  /^\s*(?:import(?:[\s\S]*?from\s*)?|export[\s\S]*?from\s*)["']([^"']+)["']|^\s*(?:const|let|var).*=\s*require\(["']([^"']+)["']\)/;
+
 function language(path: string): ContextChunk["language"] {
   const ext = extname(path).toLowerCase();
   return [".ts", ".tsx"].includes(ext)
@@ -16,64 +15,145 @@ function language(path: string): ContextChunk["language"] {
       ? "javascript"
       : "fallback";
 }
-function braceDelta(line: string): number {
-  return (line.match(/{/g)?.length ?? 0) - (line.match(/}/g)?.length ?? 0);
+
+function takeUtf8(value: string, maxBytes: number): string {
+  let output = "";
+  let size = 0;
+  for (const character of value) {
+    const bytes = Buffer.byteLength(character, "utf8");
+    if (size + bytes > maxBytes) break;
+    output += character;
+    size += bytes;
+  }
+  return output;
 }
+
+type ChunkBase = Omit<
+  ContextChunk,
+  | "id"
+  | "contentHash"
+  | "startLine"
+  | "endLine"
+  | "content"
+  | "contentComplete"
+  | "omissionReason"
+>;
+
 function makeChunk(
-  base: Omit<
-    ContextChunk,
-    "id" | "contentHash" | "startLine" | "endLine" | "content"
-  >,
-  lines: string[],
-  start: number,
+  base: ChunkBase,
+  content: string,
+  startLine: number,
+  endLine: number,
+  contentComplete = true,
+  omissionReason?: string,
 ): ContextChunk {
-  const content = lines.join("\n");
   const contentHash = hash(content);
   return {
     ...base,
-    startLine: start,
-    endLine: start + lines.length - 1,
+    startLine,
+    endLine,
     content,
+    contentComplete,
+    omissionReason,
     contentHash,
     id: hash(
-      `${base.repositoryId}\0${base.revision}\0${base.path}\0${start}\0${contentHash}\0${CHUNKER_VERSION}`,
+      `${base.repositoryId}\0${base.revision}\0${base.path}\0${startLine}\0${endLine}\0${contentHash}\0${CHUNKER_VERSION}`,
     ).slice(0, 24),
   };
 }
+
 function splitBounded(
-  base: Omit<
-    ContextChunk,
-    "id" | "contentHash" | "startLine" | "endLine" | "content"
-  >,
+  base: ChunkBase,
   lines: string[],
-  start: number,
+  startLine: number,
   maxTokens: number,
 ): ContextChunk[] {
   const chunks: ContextChunk[] = [];
   let current: string[] = [];
-  let currentStart = start;
+  let currentStart = startLine;
+  const flush = () => {
+    if (!current.length) return;
+    chunks.push(
+      makeChunk(
+        base,
+        current.join("\n"),
+        currentStart,
+        currentStart + current.length - 1,
+      ),
+    );
+    current = [];
+  };
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     if (
       current.length &&
       estimateTokens([...current, line].join("\n")) > maxTokens
     ) {
-      chunks.push(makeChunk(base, current, currentStart));
-      current = [];
-      currentStart = start + index;
+      flush();
+      currentStart = startLine + index;
     }
     if (estimateTokens(line) > maxTokens) {
-      const width = maxTokens * 3;
-      for (let offset = 0; offset < line.length; offset += width)
+      flush();
+      let remaining = line;
+      while (remaining) {
+        const part = takeUtf8(remaining, maxTokens);
+        if (!part) {
+          chunks.push(
+            makeChunk(
+              base,
+              "",
+              startLine + index,
+              startLine + index,
+              false,
+              "A code point exceeded the configured chunk budget.",
+            ),
+          );
+          break;
+        }
         chunks.push(
-          makeChunk(base, [line.slice(offset, offset + width)], start + index),
+          makeChunk(base, part, startLine + index, startLine + index, false),
         );
-      currentStart = start + index + 1;
-    } else current.push(line);
+        remaining = remaining.slice(part.length);
+      }
+      currentStart = startLine + index + 1;
+    } else {
+      if (!current.length) currentStart = startLine + index;
+      current.push(line);
+    }
   }
-  if (current.length) chunks.push(makeChunk(base, current, currentStart));
+  flush();
   return chunks;
 }
+
+function symbolName(statement: ts.Statement): string | undefined {
+  if (
+    ts.isFunctionDeclaration(statement) ||
+    ts.isClassDeclaration(statement) ||
+    ts.isInterfaceDeclaration(statement) ||
+    ts.isTypeAliasDeclaration(statement) ||
+    ts.isEnumDeclaration(statement)
+  )
+    return statement.name?.text;
+  if (ts.isVariableStatement(statement)) {
+    const names = statement.declarationList.declarations
+      .map((declaration) =>
+        ts.isIdentifier(declaration.name) ? declaration.name.text : undefined,
+      )
+      .filter((name): name is string => Boolean(name));
+    return names.length ? names.join(",") : undefined;
+  }
+  return undefined;
+}
+
+function scriptKind(path: string): ts.ScriptKind {
+  const ext = extname(path).toLowerCase();
+  if (ext === ".tsx") return ts.ScriptKind.TSX;
+  if (ext === ".jsx") return ts.ScriptKind.JSX;
+  return [".js", ".mjs", ".cjs"].includes(ext)
+    ? ts.ScriptKind.JS
+    : ts.ScriptKind.TS;
+}
+
 export function chunkSource(input: {
   repositoryId: string;
   revision: string;
@@ -81,13 +161,43 @@ export function chunkSource(input: {
   content: string;
   maxTokens: number;
 }): ContextChunk[] {
-  const lines = input.content.replace(/\r\n/g, "\n").split("\n");
+  const normalized = input.content.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
   const lang = language(input.path);
-  const imports = lines
-    .map((line) => IMPORT.exec(line))
-    .filter(Boolean)
-    .map((match) => match?.[1] ?? match?.[2] ?? "")
-    .filter(Boolean);
+  if (lang === "fallback")
+    return splitBounded(
+      {
+        repositoryId: input.repositoryId,
+        revision: input.revision,
+        path: input.path,
+        language: lang,
+        kind: "file",
+        imports: [],
+      },
+      lines,
+      1,
+      input.maxTokens,
+    );
+
+  const sourceFile = ts.createSourceFile(
+    input.path,
+    normalized,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind(input.path),
+  );
+  const imports = sourceFile.statements.flatMap((statement) => {
+    if (
+      (ts.isImportDeclaration(statement) ||
+        ts.isExportDeclaration(statement)) &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteralLike(statement.moduleSpecifier)
+    )
+      return [statement.moduleSpecifier.text];
+    if (ts.isImportEqualsDeclaration(statement))
+      return [statement.moduleReference.getText(sourceFile)];
+    return [];
+  });
   const common = {
     repositoryId: input.repositoryId,
     revision: input.revision,
@@ -95,39 +205,44 @@ export function chunkSource(input: {
     language: lang,
     imports,
   };
-  if (lang === "fallback")
-    return splitBounded({ ...common, kind: "file" }, lines, 1, input.maxTokens);
   const chunks: ContextChunk[] = [];
-  let index = 0;
-  while (index < lines.length) {
-    const match = SYMBOL.exec(lines[index]!);
-    if (!match) {
-      index++;
-      continue;
-    }
-    const start = index;
-    let depth = 0;
-    let sawBrace = false;
-    do {
-      const delta = braceDelta(lines[index]!);
-      if (lines[index]!.includes("{")) sawBrace = true;
-      depth += delta;
-      index++;
-    } while (
-      index < lines.length &&
-      ((sawBrace && depth > 0) || (!sawBrace && index === start + 1))
-    );
-    const signature = lines[start]!.trim().slice(0, 300);
+  let nextFallbackLine = 0;
+  const addFallback = (start: number, endExclusive: number) => {
+    if (endExclusive <= start) return;
     chunks.push(
       ...splitBounded(
-        { ...common, kind: "symbol", name: match[1], signature },
-        lines.slice(start, index),
+        { ...common, kind: "file" },
+        lines.slice(start, endExclusive),
         start + 1,
         input.maxTokens,
       ),
     );
+  };
+  for (const statement of sourceFile.statements) {
+    const name = symbolName(statement);
+    if (!name) continue;
+    const start = sourceFile.getLineAndCharacterOfPosition(
+      statement.getStart(sourceFile),
+    ).line;
+    const end =
+      sourceFile.getLineAndCharacterOfPosition(
+        Math.max(statement.getStart(sourceFile), statement.getEnd() - 1),
+      ).line + 1;
+    addFallback(nextFallbackLine, start);
+    const statementText = statement.getText(sourceFile);
+    const signature = statementText.replace(/\s+/g, " ").slice(0, 300);
+    chunks.push(
+      ...splitBounded(
+        { ...common, kind: "symbol", name, signature },
+        lines.slice(start, end),
+        start + 1,
+        input.maxTokens,
+      ),
+    );
+    nextFallbackLine = Math.max(nextFallbackLine, end);
   }
-  if (!chunks.length)
-    return splitBounded({ ...common, kind: "file" }, lines, 1, input.maxTokens);
-  return chunks;
+  addFallback(nextFallbackLine, lines.length);
+  return chunks.length
+    ? chunks
+    : splitBounded({ ...common, kind: "file" }, lines, 1, input.maxTokens);
 }

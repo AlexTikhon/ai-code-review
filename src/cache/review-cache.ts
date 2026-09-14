@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { ModelResult, ModelRequest } from "../model/types.js";
+import { reviewResponseSchema } from "../schemas/review.schema.js";
+import { z } from "zod";
 import { POLICY_VERSION, PROMPT_VERSION } from "../review/types.js";
 export function reviewCacheKey(request: ModelRequest): string {
   return createHash("sha256")
@@ -21,9 +23,24 @@ export async function readReviewCache(
   key: string,
 ): Promise<ModelResult | undefined> {
   try {
-    return JSON.parse(
-      await readFile(join(root, cacheDir, "reviews", `${key}.json`), "utf8"),
-    ) as ModelResult;
+    const parsed = z
+      .object({
+        response: reviewResponseSchema,
+        usage: z.object({
+          inputTokens: z.number().nonnegative().finite(),
+          outputTokens: z.number().nonnegative().finite(),
+          actual: z.boolean(),
+        }),
+      })
+      .safeParse(
+        JSON.parse(
+          await readFile(
+            join(root, cacheDir, "reviews", `${key}.json`),
+            "utf8",
+          ),
+        ),
+      );
+    return parsed.success ? parsed.data : undefined;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     return undefined;

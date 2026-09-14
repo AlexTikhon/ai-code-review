@@ -3,6 +3,7 @@ export interface EmbeddingAdapter {
   readonly provider: string;
   readonly model: string;
   readonly version: string;
+  readonly dimensions?: number;
   embed(texts: string[], signal?: AbortSignal): Promise<number[][]>;
 }
 export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
@@ -13,6 +14,15 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
     private readonly apiKey = process.env.OPENAI_API_KEY,
     private readonly endpoint = "https://api.openai.com/v1/embeddings",
   ) {}
+  get dimensions(): number | undefined {
+    return this.model === "text-embedding-3-small"
+      ? 1536
+      : this.model === "text-embedding-3-large"
+        ? 3072
+        : this.model === "text-embedding-ada-002"
+          ? 1536
+          : undefined;
+  }
   async embed(texts: string[], signal?: AbortSignal): Promise<number[][]> {
     if (!this.apiKey) throw new Error("Missing OPENAI_API_KEY for embeddings");
     const response = await fetch(this.endpoint, {
@@ -31,9 +41,24 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
     const json = (await response.json()) as {
       data: Array<{ embedding: number[]; index: number }>;
     };
-    return json.data
+    if (!Array.isArray(json.data) || json.data.length !== texts.length)
+      throw new Error(
+        `OpenAI embeddings response count ${json.data?.length ?? "invalid"} does not match request count ${texts.length}`,
+      );
+    const indices = json.data.map((item) => item.index);
+    if (
+      indices.some(
+        (index) =>
+          !Number.isInteger(index) || index < 0 || index >= texts.length,
+      ) ||
+      new Set(indices).size !== texts.length
+    )
+      throw new Error("OpenAI embeddings response contained invalid indices");
+    const vectors = json.data
       .sort((a, b) => a.index - b.index)
       .map((item) => item.embedding);
+    validateEmbeddingBatch(vectors, texts.length, this.dimensions);
+    return vectors;
   }
 }
 /** Deterministic local vectorizer for tests/evaluation only; it is intentionally not selected by the production CLI. */
@@ -41,6 +66,7 @@ export class DeterministicTestEmbedding implements EmbeddingAdapter {
   readonly provider = "test";
   readonly model = "hash-test";
   readonly version = "v1";
+  readonly dimensions = 64;
   async embed(texts: string[]): Promise<number[][]> {
     return texts.map((text) => {
       const vector = new Array<number>(64).fill(0);
@@ -53,4 +79,27 @@ export class DeterministicTestEmbedding implements EmbeddingAdapter {
       return vector.map((value) => value / norm);
     });
   }
+}
+
+export function validateEmbeddingBatch(
+  vectors: number[][],
+  expectedCount: number,
+  expectedDimensions?: number,
+): number {
+  if (vectors.length !== expectedCount)
+    throw new Error(
+      `Embedding response count ${vectors.length} does not match request count ${expectedCount}`,
+    );
+  const dimensions = expectedDimensions ?? vectors[0]?.length ?? 0;
+  if (dimensions <= 0)
+    throw new Error("Embedding vectors must have a positive dimension");
+  for (const vector of vectors)
+    if (
+      vector.length !== dimensions ||
+      vector.some((value) => !Number.isFinite(value))
+    )
+      throw new Error(
+        `Embedding vector dimension/shape mismatch; expected ${dimensions}`,
+      );
+  return dimensions;
 }

@@ -29,12 +29,11 @@ const SENSITIVE_SUFFIXES = [
   ".jks",
   ".keystore",
 ];
-const SENSITIVE_PATH_PARTS = [
-  ".aws/credentials",
-  ".ssh/",
-  ".gnupg/",
-  ".kube/config",
-];
+const SENSITIVE_DIRECTORY_COMPONENTS = new Set([".ssh", ".gnupg"]);
+const SENSITIVE_COMPONENT_SUFFIXES = [
+  [".aws", "credentials"],
+  [".kube", "config"],
+] as const;
 const SECRET_PATTERNS: Array<{ name: string; expression: RegExp }> = [
   {
     name: "private key",
@@ -59,12 +58,17 @@ export function isMandatorySensitivePath(filename: string): boolean {
     .replace(/^\.\//, "")
     .toLowerCase();
   const basename = normalized.split("/").at(-1) ?? normalized;
+  const components = normalized.split("/").filter(Boolean);
   if (basename.startsWith(".env")) return true;
   return (
     SENSITIVE_BASENAMES.has(basename) ||
     SENSITIVE_SUFFIXES.some((suffix) => basename.endsWith(suffix)) ||
-    SENSITIVE_PATH_PARTS.some(
-      (part) => normalized === part || normalized.includes(`/${part}`),
+    components.some((part) => SENSITIVE_DIRECTORY_COMPONENTS.has(part)) ||
+    SENSITIVE_COMPONENT_SUFFIXES.some(([directory, file]) =>
+      components.some(
+        (component, index) =>
+          component === directory && components[index + 1] === file,
+      ),
     )
   );
 }

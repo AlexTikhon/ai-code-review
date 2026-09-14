@@ -14,24 +14,35 @@ type NameStatusEntry = {
 };
 export type LocalCollectionOptions = {
   pathAllowed?: (filename: string) => boolean;
+  signal?: AbortSignal;
 };
 
-async function runGit(args: string[], cwd: string): Promise<string> {
+async function runGit(
+  args: string[],
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd,
     maxBuffer: 20 * 1024 * 1024,
     encoding: "utf8",
     env: { ...process.env, GIT_EXTERNAL_DIFF: "", GIT_DIFF_OPTS: "" },
+    signal,
   });
   return stdout;
 }
 export async function resolveRepositoryRoot(
   repoPath = process.cwd(),
+  signal?: AbortSignal,
 ): Promise<string> {
   try {
     return await realpath(
       (
-        await runGit(["rev-parse", "--show-toplevel"], resolve(repoPath))
+        await runGit(
+          ["rev-parse", "--show-toplevel"],
+          resolve(repoPath),
+          signal,
+        )
       ).trim(),
     );
   } catch (error) {
@@ -191,6 +202,7 @@ async function tracked(
   root: string,
   ref: string,
   allowed: (path: string) => boolean,
+  signal?: AbortSignal,
 ): Promise<SourceFile[]> {
   const entries = parseNameStatusZ(
     await runGit(
@@ -204,46 +216,71 @@ async function tracked(
         ref,
       ],
       root,
+      signal,
     ),
   );
-  return Promise.all(
-    entries.map(async (entry) => {
-      if (!allowed(entry.filename))
-        return { ...entry, additions: 0, deletions: 0, changes: 0 };
-      const patch = await runGit(
-        [
-          "diff",
-          "--no-color",
-          "--no-ext-diff",
-          "--no-textconv",
-          "--find-renames",
-          ref,
-          "--",
-          entry.filename,
-        ],
-        root,
-      );
-      const stats = countPatchStats(patch);
-      return { ...entry, ...stats, patch: patch || undefined };
-    }),
-  );
+  const results: SourceFile[] = [];
+  for (let offset = 0; offset < entries.length; offset += 8) {
+    const batch = await Promise.all(
+      entries.slice(offset, offset + 8).map(async (entry) => {
+        if (!allowed(entry.filename))
+          return { ...entry, additions: 0, deletions: 0, changes: 0 };
+        const patch = await runGit(
+          [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--find-renames",
+            ref,
+            "--",
+            entry.filename,
+          ],
+          root,
+          signal,
+        );
+        const stats = countPatchStats(patch);
+        return { ...entry, ...stats, patch: patch || undefined };
+      }),
+    );
+    results.push(...batch);
+  }
+  return results;
 }
 async function untracked(
   root: string,
   allowed: (path: string) => boolean,
+  signal?: AbortSignal,
 ): Promise<SourceFile[]> {
   const names = (
-    await runGit(["ls-files", "-z", "--others", "--exclude-standard"], root)
+    await runGit(
+      ["ls-files", "-z", "--others", "--exclude-standard"],
+      root,
+      signal,
+    )
   )
     .split("\0")
     .filter(Boolean);
-  return Promise.all(
-    names.map((name) => buildUntrackedFilePatch(root, name, allowed(name))),
-  );
+  const results: SourceFile[] = [];
+  for (let offset = 0; offset < names.length; offset += 8)
+    results.push(
+      ...(await Promise.all(
+        names
+          .slice(offset, offset + 8)
+          .map((name) => buildUntrackedFilePatch(root, name, allowed(name))),
+      )),
+    );
+  return results;
 }
-async function baseRevision(root: string, base?: string): Promise<string> {
+async function baseRevision(
+  root: string,
+  base?: string,
+  signal?: AbortSignal,
+): Promise<string> {
   if (!base) return "HEAD";
-  const mergeBase = (await runGit(["merge-base", base, "HEAD"], root)).trim();
+  const mergeBase = (
+    await runGit(["merge-base", base, "HEAD"], root, signal)
+  ).trim();
   if (!mergeBase) throw new Error(`Could not resolve merge-base for ${base}`);
   return mergeBase;
 }
@@ -253,15 +290,15 @@ export async function getLocalDiff(
   repoPath = process.cwd(),
   options: LocalCollectionOptions = {},
 ): Promise<ReviewSource> {
-  const root = await resolveRepositoryRoot(repoPath);
-  const compare = await baseRevision(root, base);
+  const root = await resolveRepositoryRoot(repoPath, options.signal);
+  const compare = await baseRevision(root, base, options.signal);
   const allowed = options.pathAllowed ?? (() => true);
   const [head, immutableBase, trackedFiles, untrackedFiles] = await Promise.all(
     [
-      runGit(["rev-parse", "HEAD"], root),
-      runGit(["rev-parse", compare], root),
-      tracked(root, compare, allowed),
-      untracked(root, allowed),
+      runGit(["rev-parse", "HEAD"], root, options.signal),
+      runGit(["rev-parse", compare], root, options.signal),
+      tracked(root, compare, allowed, options.signal),
+      untracked(root, allowed, options.signal),
     ],
   );
   const files = [...trackedFiles, ...untrackedFiles];

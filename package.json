@@ -32,12 +32,12 @@
   "dependencies": {
     "dotenv": "^16.4.0",
     "ignore": "^7.0.9",
+    "typescript": "^5.8.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
     "prettier": "^3.9.6",
-    "tsx": "^4.23.13",
-    "typescript": "^5.8.0"
+    "tsx": "^4.23.13"
   }
 }

@@ -1,6 +1,6 @@
-export const RESULT_SCHEMA_VERSION = "1.0.0";
-export const PROMPT_VERSION = "2.0.0";
-export const POLICY_VERSION = "1.0.0";
+export const RESULT_SCHEMA_VERSION = "1.1.0";
+export const PROMPT_VERSION = "3.0.0";
+export const POLICY_VERSION = "1.1.0";
 
 export type ReviewStatus = "complete" | "partial" | "failed";
 export type FindingSeverity = "high" | "medium" | "low";
@@ -77,6 +77,13 @@ export type PatchSegment = {
   id: string;
   text: string;
   lineRanges: Array<{ start: number; end: number }>;
+  lineMappings: Array<{
+    segmentLine: number;
+    kind: "context" | "addition" | "deletion";
+    oldLine?: number;
+    newLine?: number;
+    complete: boolean;
+  }>;
   truncated: boolean;
 };
 export type ReviewableFile = SourceFile & {
@@ -94,19 +101,28 @@ export type SkippedFile = {
 
 export type Coverage = {
   /** Source entries reported by Git/GitHub. */ discovered: number;
-  /** Entries permitted by mandatory privacy policy, user ignore rules, and type policy. */ eligible: number;
+  /** Reviewable source/test/config entries, including entries omitted for missing coverage or work limits. */ eligible: number;
   /** Files for which a review was scheduled; cache hits count. */ attempted: number;
   /** Files whose scheduled segments all returned a valid review or abstention. */ reviewed: number;
   /** Eligible files with an operational/model/validation failure. */ failed: number;
-  /** Entries intentionally omitted by policy or unsupported type. */ skipped: number;
+  /** Entries intentionally excluded by privacy, ignore, generated-file, or file-type policy. */ skipped: number;
+  /** Eligible entries omitted because a patch was unavailable or a work limit was reached. */ omitted: number;
   /** Eligible files whose original diff was not fully presented. */ truncated: number;
 };
 export type Usage = {
+  /** Logical diff segments processed or served from cache. */
   requests: number;
+  /** Actual model provider attempts in this run, including retries. */
   attempts: number;
+  /** Actual provider-reported model tokens for this run only. */
   inputTokens: number;
   outputTokens: number;
+  /** All external model and embedding calls made in this run. */
   actualRequests: number;
+  /** Actual embedding calls made in this run. */
+  embeddingRequests: number;
+  /** Conservative input estimate for logical review work, including cache hits. */
+  estimatedInputTokens: number;
   estimated: boolean;
   cacheHits: number;
   latencyMs: number;

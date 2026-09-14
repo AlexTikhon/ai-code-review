@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { reviewCacheKey } from "../src/cache/review-cache.js";
+import { readReviewCache, reviewCacheKey } from "../src/cache/review-cache.js";
 import { unitTest } from "./helpers.js";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 unitTest(
   "review cache keys vary with patch, context, metadata and model configuration",
   () => {
@@ -27,3 +30,18 @@ unitTest(
     assert.notEqual(reviewCacheKey({ ...base, maxOutputTokens: 101 }), key);
   },
 );
+
+unitTest("malformed cached model responses are ignored", async () => {
+  const root = await mkdtemp(join(tmpdir(), "acr-review-cache-"));
+  const key = "malformed";
+  const directory = join(root, ".cache", "reviews");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, `${key}.json`),
+    JSON.stringify({
+      response: { findings: "not-an-array" },
+      usage: { inputTokens: -1, outputTokens: 0, actual: true },
+    }),
+  );
+  assert.equal(await readReviewCache(root, ".cache", key), undefined);
+});

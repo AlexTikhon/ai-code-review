@@ -6,6 +6,7 @@ import {
 } from "../cache/review-cache.js";
 import type { CliArgs } from "../cli/args.js";
 import { loadConfig, type ReviewConfig } from "../config/config.js";
+import { ExternalRequestBudget } from "../model/budget.js";
 import { executeModel } from "../model/execution.js";
 import { OpenAIReviewModel } from "../model/openai.js";
 import type { ReviewModel } from "../model/types.js";
@@ -41,6 +42,7 @@ import {
 } from "../review-sources/local/local.js";
 import { deduplicateFindings, validateFindings } from "./findings.js";
 import { filterReviewFiles, ignoreFromTrustedContents } from "./filter.js";
+import { estimateTokens } from "./patch.js";
 import {
   isIgnoredPath,
   loadIgnorePolicy,
@@ -72,6 +74,7 @@ const emptyCoverage = (): Coverage => ({
   reviewed: 0,
   failed: 0,
   skipped: 0,
+  omitted: 0,
   truncated: 0,
 });
 const emptyUsage = (): Usage => ({
@@ -80,6 +83,8 @@ const emptyUsage = (): Usage => ({
   inputTokens: 0,
   outputTokens: 0,
   actualRequests: 0,
+  embeddingRequests: 0,
+  estimatedInputTokens: 0,
   estimated: false,
   cacheHits: 0,
   latencyMs: 0,
@@ -126,23 +131,30 @@ function sourceSummary(
 async function ingest(
   args: CliArgs,
   policyRef: { current?: LoadedIgnore },
+  signal: AbortSignal,
 ): Promise<ReviewSource> {
   if (args.reviewMode === "pr") {
     const source = await getGithubReviewSource(
       args.owner,
       args.repo,
       args.pullNumber,
+      undefined,
+      signal,
     );
     if (args.localRepoPath)
-      source.repositoryRoot = await resolveRepositoryRoot(args.localRepoPath);
+      source.repositoryRoot = await resolveRepositoryRoot(
+        args.localRepoPath,
+        signal,
+      );
     return source;
   }
-  const root = await resolveRepositoryRoot(args.localRepoPath);
+  const root = await resolveRepositoryRoot(args.localRepoPath, signal);
   const policy = await loadIgnorePolicy(root);
   policyRef.current = policy;
   return getLocalDiff(args.localBaseRef, root, {
     pathAllowed: (filename) =>
       !isMandatorySensitivePath(filename) && !isIgnoredPath(filename, policy),
+    signal,
   });
 }
 function contextUses(candidates: RetrievalCandidate[]) {
@@ -192,6 +204,14 @@ export async function runReviewPipeline(
     config.totalTimeoutMs,
   );
   timer.unref?.();
+  const externalBudget = new ExternalRequestBudget(
+    config.maxRequests,
+    totalController.signal,
+    (kind) => {
+      result.usage.actualRequests++;
+      if (kind === "embedding") result.usage.embeddingRequests++;
+    },
+  );
   try {
     if (
       !deps.model &&
@@ -213,7 +233,8 @@ export async function runReviewPipeline(
     emitEvent(events, runId, "ingest", "start");
     let source: ReviewSource;
     try {
-      source = deps.source ?? (await ingest(args, policyRef));
+      source =
+        deps.source ?? (await ingest(args, policyRef, totalController.signal));
     } catch (error) {
       result.errors.push({
         stage: "ingest",
@@ -237,8 +258,9 @@ export async function runReviewPipeline(
             : ignoreFromTrustedContents()));
     const filtered = filterReviewFiles(source, policy, config);
     result.skippedFiles = filtered.skipped;
-    result.coverage.eligible = filtered.files.length;
-    result.coverage.skipped = filtered.skipped.length;
+    result.coverage.eligible = filtered.eligible;
+    result.coverage.omitted = filtered.omitted;
+    result.coverage.skipped = filtered.skipped.length - filtered.omitted;
     result.coverage.truncated = filtered.files.filter(
       (file) => file.truncated,
     ).length;
@@ -269,35 +291,27 @@ export async function runReviewPipeline(
         };
       } else {
         try {
-          if (source.mode === "pr") {
-            const checkout = await getLocalDiff(
-              undefined,
-              source.repositoryRoot,
-              { pathAllowed: () => false },
-            );
-            if (checkout.headRevision !== source.headRevision)
-              throw new Error(
-                `Checkout HEAD ${checkout.headRevision} does not match PR head ${source.headRevision}`,
-              );
-          }
           if (
             args.contextMode === "hybrid" &&
             !embedding &&
             config.allowEmbeddings
           )
             embedding = new OpenAIEmbeddingAdapter(config.embeddingModel);
+          const maxChunkTokens = Math.min(config.maxContextTokens, 800);
           repositoryIndex = await buildRepositoryIndex({
             root: source.repositoryRoot,
             repositoryId: source.repositoryId,
             revision: source.snapshotId,
+            gitRevision: source.mode === "pr" ? source.headRevision : undefined,
             cacheDirName: config.cacheDirName,
-            maxChunkTokens: Math.min(config.maxContextTokens, 800),
+            maxChunkTokens,
             ignorePolicy: policy,
             embedding:
               args.contextMode === "hybrid" && !args.dryRun
                 ? embedding
                 : undefined,
             signal: totalController.signal,
+            beforeEmbeddingRequest: () => externalBudget.reserve("embedding"),
           });
           result.context.state = "used";
           if (args.contextMode === "hybrid" && !embedding)
@@ -328,7 +342,7 @@ export async function runReviewPipeline(
       filename: file.filename,
       segments: file.segments.length,
       estimatedInputTokens: file.segments.reduce(
-        (sum, segment) => sum + Math.ceil(segment.text.length / 3),
+        (sum, segment) => sum + estimateTokens(segment.text),
         0,
       ),
     }));
@@ -358,23 +372,13 @@ export async function runReviewPipeline(
       result.summary = `Dry run: ${filtered.files.length} file(s) proposed, ${filtered.skipped.length} omitted. No model or embedding calls were made.`;
       return result;
     }
-    let requestReservations = 0;
     const tasks = filtered.files.map((file) => async () => {
       result.coverage.attempted++;
       let fileFailed = false;
       let completedSegments = 0;
       for (const segment of file.segments) {
-        if (++requestReservations > config.maxRequests) {
-          fileFailed = true;
-          result.errors.push({
-            stage: "analyze",
-            filename: file.filename,
-            message: `Total request work limit ${config.maxRequests} exceeded`,
-            fatal: false,
-          });
-          break;
-        }
         try {
+          totalController.signal.throwIfAborted();
           let candidates: RetrievalCandidate[] = [];
           if (repositoryIndex && args.contextMode !== "diff")
             candidates = await retrieveContext({
@@ -389,6 +393,7 @@ export async function runReviewPipeline(
               threshold: config.relevanceThreshold,
               embedding: args.contextMode === "hybrid" ? embedding : undefined,
               signal: totalController.signal,
+              beforeEmbeddingRequest: () => externalBudget.reserve("embedding"),
             });
           const assembled = assembleReviewPrompt({
             title: source.title,
@@ -418,19 +423,30 @@ export async function runReviewPipeline(
             model: config.model,
             maxOutputTokens: config.maxOutputTokens,
           };
+          result.usage.requests++;
+          result.usage.estimatedInputTokens += assembled.estimatedInputTokens;
           const key = reviewCacheKey(request);
           const root = source.repositoryRoot;
-          const cached = root
+          let cached = root
             ? await readReviewCache(root, config.cacheDirName, key)
             : undefined;
+          let validated = cached
+            ? validateFindings(
+                cached.response,
+                file.filename,
+                segment,
+                assembled.context,
+              )
+            : undefined;
+          if (cached && validated!.length !== cached.response.findings.length) {
+            cached = undefined;
+            validated = undefined;
+          }
           let modelResult;
           let attempts = 0;
-          result.usage.requests++;
           if (cached) {
             modelResult = cached;
             result.usage.cacheHits++;
-            result.usage.inputTokens += assembled.estimatedInputTokens;
-            result.usage.estimated = true;
           } else {
             const executed = await executeModel({
               model,
@@ -441,9 +457,22 @@ export async function runReviewPipeline(
               requestTimeoutMs: config.requestTimeoutMs,
               totalSignal: totalController.signal,
               events,
+              beforeAttempt: () => externalBudget.reserve("model"),
             });
             modelResult = executed.result;
             attempts = executed.attempts;
+            result.usage.attempts += attempts;
+            attempts = 0;
+            validated = validateFindings(
+              modelResult.response,
+              file.filename,
+              segment,
+              assembled.context,
+            );
+            if (validated.length !== modelResult.response.findings.length)
+              throw new Error(
+                "Model returned one or more invalid evidence references",
+              );
             if (root)
               await writeReviewCache(
                 root,
@@ -451,15 +480,14 @@ export async function runReviewPipeline(
                 key,
                 modelResult,
               );
-            result.usage.actualRequests += attempts;
-            result.usage.inputTokens += modelResult.usage.actual
-              ? modelResult.usage.inputTokens
-              : assembled.estimatedInputTokens;
+            if (modelResult.usage.actual) {
+              result.usage.inputTokens += modelResult.usage.inputTokens;
+              result.usage.outputTokens += modelResult.usage.outputTokens;
+            }
             result.usage.estimated =
               result.usage.estimated || !modelResult.usage.actual;
           }
           result.usage.attempts += attempts;
-          result.usage.outputTokens += modelResult.usage.outputTokens;
           if (modelResult.response.abstained) {
             result.abstentions.push({
               filename: file.filename,
@@ -469,24 +497,13 @@ export async function runReviewPipeline(
                 "insufficient evidence",
             });
           }
-          const validated = validateFindings(
-            modelResult.response,
-            file.filename,
-            segment,
-            assembled.context,
-          );
-          if (validated.length !== modelResult.response.findings.length)
-            throw new Error(
-              "Model returned one or more invalid evidence references",
-            );
-          result.findings.push(...validated);
+          result.findings.push(...validated!);
           completedSegments++;
         } catch (error) {
           const attempts = Number(
             (error as { attempts?: number })?.attempts ?? 0,
           );
           result.usage.attempts += attempts;
-          result.usage.actualRequests += attempts;
           fileFailed = true;
           result.errors.push({
             stage: "analyze",
@@ -509,8 +526,9 @@ export async function runReviewPipeline(
     const incomplete =
       !source.coverageComplete ||
       result.coverage.failed > 0 ||
+      result.coverage.omitted > 0 ||
       result.coverage.truncated > 0 ||
-      (result.coverage.discovered > 0 && result.coverage.reviewed === 0);
+      (args.contextMode !== "diff" && result.context.state === "unavailable");
     result.status =
       result.coverage.eligible > 0 && result.coverage.reviewed === 0
         ? "failed"
@@ -521,10 +539,12 @@ export async function runReviewPipeline(
       result.status = "complete";
       result.summary =
         "No changed files were discovered; no clean-code claim was made.";
-    } else if (result.coverage.reviewed === 0)
-      result.summary = `No files were fully reviewed (${result.coverage.skipped} skipped, ${result.coverage.failed} failed); the input is unreviewed, not clean.`;
+    } else if (result.coverage.eligible === 0)
+      result.summary = `${result.status === "complete" ? "Review policy applied completely" : "Review coverage incomplete"}: no files were eligible (${result.coverage.skipped} intentionally excluded); no clean-code claim was made.`;
+    else if (result.coverage.reviewed === 0)
+      result.summary = `No eligible files were fully reviewed (${result.coverage.omitted} omitted, ${result.coverage.failed} failed); the input is unreviewed, not clean.`;
     else
-      result.summary = `${result.status === "complete" ? "Review complete" : "Review partial"}: reviewed ${result.coverage.reviewed}/${result.coverage.eligible} eligible file(s), found ${result.findings.length} validated issue(s), skipped ${result.coverage.skipped}, truncated ${result.coverage.truncated}.`;
+      result.summary = `${result.status === "complete" ? "Review complete" : "Review partial"}: reviewed ${result.coverage.reviewed}/${result.coverage.eligible} eligible file(s), found ${result.findings.length} validated issue(s), intentionally skipped ${result.coverage.skipped}, omitted ${result.coverage.omitted}, truncated ${result.coverage.truncated}.`;
     return result;
   } finally {
     clearTimeout(timer);
@@ -539,6 +559,7 @@ export async function runReviewPipeline(
         reviewed: result.coverage.reviewed,
         failed: result.coverage.failed,
         skipped: result.coverage.skipped,
+        omitted: result.coverage.omitted,
         truncated: result.coverage.truncated,
         requests: result.usage.requests,
         attempts: result.usage.attempts,

@@ -16,6 +16,7 @@ export async function executeModel(input: {
   requestTimeoutMs: number;
   totalSignal: AbortSignal;
   events: EventSink;
+  beforeAttempt?: () => void;
 }): Promise<{ result: ModelResult; attempts: number }> {
   let last: unknown;
   for (let attempt = 1; attempt <= input.maxAttempts; attempt++) {
@@ -29,6 +30,13 @@ export async function executeModel(input: {
       filename: input.filename,
       attempt,
     });
+    try {
+      input.beforeAttempt?.();
+    } catch (error) {
+      if (error && typeof error === "object")
+        Object.assign(error, { attempts: attempt - 1 });
+      throw error;
+    }
     try {
       return {
         result: await input.model.review(input.request, requestSignal),

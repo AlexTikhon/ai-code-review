@@ -5,10 +5,19 @@ import {
 } from "../src/review/findings.js";
 import { reviewResponseSchema } from "../src/schemas/review.schema.js";
 import { unitTest } from "./helpers.js";
+import { splitPatchForReview } from "../src/review/patch.js";
 const segment = {
   id: "s",
   text: "@@ -1 +10 @@\n+bug()",
   lineRanges: [{ start: 10, end: 10 }],
+  lineMappings: [
+    {
+      segmentLine: 2,
+      kind: "addition" as const,
+      newLine: 10,
+      complete: true,
+    },
+  ],
   truncated: false,
 };
 unitTest("finding validation rejects nonexistent evidence", () => {
@@ -66,3 +75,43 @@ unitTest("schema supports abstention and rejects malformed output", () => {
     false,
   );
 });
+
+unitTest(
+  "later-segment evidence is accepted only for supplied complete lines",
+  () => {
+    const segments = splitPatchForReview(
+      `@@ -0,0 +100,8 @@\n${Array.from({ length: 8 }, (_, index) => `+line_${100 + index}=${"x".repeat(45)}`).join("\n")}`,
+      256,
+      10,
+    );
+    const later = segments.find((item) =>
+      item.lineMappings.some((line) => line.newLine === 106),
+    )!;
+    const accepted = reviewResponseSchema.parse({
+      findings: [
+        {
+          severity: "high",
+          category: "correctness",
+          confidence: "high",
+          title: "Later bug",
+          explanation: "Present in a later segment",
+          evidence: [{ path: "a.ts", startLine: 106, endLine: 106 }],
+        },
+      ],
+      summary: "",
+      abstained: false,
+      abstentionReason: null,
+    });
+    assert.equal(validateFindings(accepted, "a.ts", later, []).length, 1);
+    const invented = reviewResponseSchema.parse({
+      ...accepted,
+      findings: [
+        {
+          ...accepted.findings[0]!,
+          evidence: [{ path: "a.ts", startLine: 100, endLine: 106 }],
+        },
+      ],
+    });
+    assert.equal(validateFindings(invented, "a.ts", later, []).length, 0);
+  },
+);

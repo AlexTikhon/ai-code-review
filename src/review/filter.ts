@@ -16,9 +16,16 @@ export function filterReviewFiles(
   source: ReviewSource,
   policy: LoadedIgnore,
   config: ReviewConfig,
-): { files: ReviewableFile[]; skipped: SkippedFile[] } {
+): {
+  files: ReviewableFile[];
+  skipped: SkippedFile[];
+  eligible: number;
+  omitted: number;
+} {
   const files: ReviewableFile[] = [];
   const skipped: SkippedFile[] = [];
+  let eligible = 0;
+  let omitted = 0;
   for (const sourceFile of source.files) {
     const fileType = classifyFile(sourceFile.filename);
     const privacy = evaluateFilePrivacy(sourceFile);
@@ -40,16 +47,6 @@ export function filterReviewFiles(
       });
       continue;
     }
-    if (!sourceFile.patch) {
-      skipped.push({
-        filename: sourceFile.filename,
-        fileType,
-        reason: "missing_patch",
-        details:
-          "No textual patch is available (deleted, binary, excluded before read, or API omission).",
-      });
-      continue;
-    }
     if (fileType === "generated") {
       skipped.push({
         filename: sourceFile.filename,
@@ -68,7 +65,20 @@ export function filterReviewFiles(
       });
       continue;
     }
+    eligible++;
+    if (!sourceFile.patch) {
+      omitted++;
+      skipped.push({
+        filename: sourceFile.filename,
+        fileType,
+        reason: "missing_patch",
+        details:
+          "No textual patch is available for this otherwise reviewable file.",
+      });
+      continue;
+    }
     if (files.length >= config.maxFiles) {
+      omitted++;
       skipped.push({
         filename: sourceFile.filename,
         fileType,
@@ -90,5 +100,5 @@ export function filterReviewFiles(
       originalPatchCharacters: sourceFile.patch.length,
     });
   }
-  return { files, skipped };
+  return { files, skipped, eligible, omitted };
 }

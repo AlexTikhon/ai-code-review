@@ -14,7 +14,7 @@ The source-neutral pipeline is `ingest → filter/policy → retrieve → analyz
 - `--context lexical` (default) indexes the local checkout and combines keyword, symbol, and import lookup.
 - `--context hybrid` adds OpenAI embeddings when separately permitted. If embeddings are not permitted it reports that semantic retrieval was unavailable and uses lexical/symbol evidence.
 
-GitHub repository retrieval needs `--repo <checkout>` with `HEAD` exactly equal to the PR head SHA. Otherwise the result explicitly reports a diff-only fallback.
+GitHub repository retrieval needs `--repo <checkout>` whose Git object database contains the PR head SHA. Files are read from that pinned tree, so a different `HEAD`, modified tracked files, and untracked files cannot contaminate PR context. If the object is unavailable, the result reports a diff-only fallback and cannot be `complete` for a requested context mode.
 
 ## Install and verify
 
@@ -85,15 +85,15 @@ Use `--base main` in local mode, `--severity-threshold high|medium|low|none`, an
 
 Statuses:
 
-- `complete`: every eligible scheduled diff segment was validly reviewed; no coverage truncation occurred.
-- `partial`: some useful review exists but a file failed, source coverage is incomplete, content was truncated, or all discovered files were skipped.
+- `complete`: every eligible diff was validly reviewed without missing or truncated coverage. Intentional privacy/ignore/generated/type exclusions are outside the eligible denominator; if they are the only changes, the result explicitly makes no clean-code claim.
+- `partial`: some useful review exists but eligible input was omitted, a file failed, source coverage or requested context is incomplete, or content was truncated.
 - `failed`: fatal ingestion/configuration failure, or eligible input produced no completed review.
 
-Coverage fields have documented definitions in the JSON schema/type: `discovered`, `eligible`, `attempted`, `reviewed`, `failed`, `skipped`, and `truncated`. A failed or wholly unreviewed input is never called clean.
+Coverage fields have documented definitions in the JSON schema/type: `discovered`, `eligible`, `attempted`, `reviewed`, `failed`, `skipped`, `omitted`, and `truncated`. `skipped` is an intentional policy exclusion; `omitted` is eligible input lost to a missing patch or work limit. A failed or wholly unreviewed eligible input is never called clean.
 
 Exit codes are `0` for a complete result below the configured finding threshold, `1` for a complete result meeting/exceeding the threshold, `2` for failed/partial operational or incomplete review, and `64` for CLI usage errors. Dry-run/index return `0` unless their operation fails.
 
-JSON uses schema version `1.0.0`. SARIF 2.1.0 includes result status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
+JSON uses schema version `1.1.0`. SARIF 2.1.0 includes the same status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
 
 Valid insufficient-evidence responses are recorded as explicit per-segment abstentions and still count as completed review coverage; they are not findings.
 
@@ -118,6 +118,8 @@ AI_REVIEW_RETRIEVAL_TOP_K=5
 AI_REVIEW_RELEVANCE_THRESHOLD=0.05
 ```
 
-Token estimates are conservative byte estimates; actual provider usage is recorded when supplied. The full system message, bounded metadata, diff, selected context, and output reservation must fit before the provider boundary. One retry layer handles transient failures and rate-limit backoff; authentication/configuration failures are permanent.
+`AI_REVIEW_MAX_REQUESTS` is an actual external-call allowance shared atomically by model attempts (including retries), indexing embedding batches, and query embeddings. Logical review work, model attempts, embedding calls, current-run provider usage, estimates, and cache hits are reported separately. Cache hits do not count as current-run provider usage.
+
+Token estimates use a conservative one-token-per-UTF-8-byte fallback; they are not tokenizer-exact. The system/user messages, structured-output schema and message-envelope overhead, bounded metadata, diff, selected context, and output reservation must fit before the provider boundary. Provider-reported token usage is recorded only for calls made in the current run.
 
 See [architecture decisions](docs/ARCHITECTURE.md) and [evaluation details](docs/EVALUATION.md).

@@ -42,12 +42,13 @@
     "id": "heldout-large-incomplete",
     "split": "heldout",
     "changedPath": "src/generated.ts",
-    "patch": "@@ -1 +1 @@\n+[TRUNCATED: additional diff segments were not reviewed]",
+    "patch": "@@ -1,0 +100,8 @@\n+line100 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';\n+line101 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';\n+line102 = 'cccccccccccccccccccccccccccccccccccccccccccccccc';\n+line103 = 'dddddddddddddddddddddddddddddddddddddddddddddddd';\n+line104 = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';\n+line105 = 'ffffffffffffffffffffffffffffffffffffffffffffffff';\n+line106 = 'gggggggggggggggggggggggggggggggggggggggggggggggg';\n+line107 = 'hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh';",
     "documents": [],
     "relevantPaths": [],
     "expectedFindings": [],
     "clean": false,
-    "incomplete": true
+    "maxPatchTokens": 256,
+    "maxSegmentsPerFile": 1
   },
   {
     "id": "heldout-adversarial-comment",
@@ -58,5 +59,54 @@
     "relevantPaths": [],
     "expectedFindings": ["unsafe-assertion"],
     "clean": false
+  },
+  {
+    "id": "heldout-semantic-auth-contract",
+    "split": "heldout",
+    "changedPath": "src/deploy.ts",
+    "patch": "@@ -9,0 +10 @@\n+return securityDecision(user);",
+    "documents": [
+      {
+        "path": "src/policy.ts",
+        "content": "export function permissionGate(subject: { admin: boolean }) { return subject.admin; }"
+      },
+      {
+        "path": "src/noise.ts",
+        "content": "export const securityDecision = () => true;"
+      }
+    ],
+    "relevantPaths": ["src/policy.ts"],
+    "expectedFindings": ["auth-contract"],
+    "clean": false
+  },
+  {
+    "id": "heldout-same-file-helper",
+    "split": "heldout",
+    "changedPath": "src/limits.ts",
+    "patch": "@@ -11,0 +12 @@\n+return parseLimit(input);",
+    "documents": [
+      {
+        "path": "src/limits.ts",
+        "content": "function parseLimit(value: string) { return Number(value); }\nexport function readLimit(input: string) { return parseLimit(input); }"
+      }
+    ],
+    "relevantPaths": ["src/limits.ts"],
+    "expectedFindings": ["same-file-nan"],
+    "clean": false
+  },
+  {
+    "id": "heldout-clean-typed-retry",
+    "split": "heldout",
+    "changedPath": "src/config.ts",
+    "patch": "@@ -8 +8 @@\n-export const config = { maxRetries: 4 };\n+export const config = { maxRetries: 5 };",
+    "documents": [
+      {
+        "path": "src/types.ts",
+        "content": "export interface RetryConfig { maxRetries: number; timeoutMs: number }"
+      }
+    ],
+    "relevantPaths": ["src/types.ts"],
+    "expectedFindings": [],
+    "clean": true
   }
 ]

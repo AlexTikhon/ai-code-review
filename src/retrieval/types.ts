@@ -1,4 +1,4 @@
-export const CHUNKER_VERSION = "ts-js-symbols-v1";
+export const CHUNKER_VERSION = "ts-js-ast-v2";
 export type ContextChunk = {
   id: string;
   repositoryId: string;
@@ -13,13 +13,28 @@ export type ContextChunk = {
   endLine: number;
   content: string;
   contentHash: string;
+  /** False only when this chunk is a fragment of one oversized physical line. */
+  contentComplete: boolean;
+  omissionReason?: string;
 };
-export type StoredVector = { cacheKey: string; values: number[] };
+export type StoredVector = {
+  cacheKey: string;
+  values: number[];
+  inputHash: string;
+  dimensions: number;
+  provider: string;
+  model: string;
+  version: string;
+  dimensionIdentity: string;
+  chunkerVersion: string;
+  maxChunkTokens: number;
+};
 export type RepositoryIndex = {
   schemaVersion: 1;
   chunkerVersion: string;
   repositoryId: string;
   revision: string;
+  maxChunkTokens: number;
   createdAt: string;
   chunks: ContextChunk[];
   vectors: Record<string, StoredVector>;

@@ -12,6 +12,10 @@ unitTest("mandatory privacy blocks env variants, keys and credentials", () => {
     ".env.local",
     "ops/private.pem",
     ".aws/credentials",
+    ".ssh/config",
+    ".gnupg/settings.ts",
+    "nested/.ssh/config",
+    "nested/.gnupg/keyring.ts",
     "id_rsa",
   ])
     assert.equal(isMandatorySensitivePath(path), true, path);
@@ -37,7 +41,9 @@ unitTest(
   },
 );
 unitTest("user re-inclusion does not affect mandatory privacy policy", () => {
-  const rules = parseIgnoreFile("*\n!.env\n");
+  const rules = parseIgnoreFile("*\n!.env\n!.ssh/\n!.ssh/**\n");
   assert.equal(isIgnoredPath(".env", rules), false);
   assert.equal(evaluateFilePrivacy({ filename: ".env" }).allowed, false);
+  assert.equal(isIgnoredPath(".ssh/config", rules), false);
+  assert.equal(evaluateFilePrivacy({ filename: ".ssh/config" }).allowed, false);
 });

@@ -96,7 +96,7 @@ export function printReviewResult(
   console.log(`\n${sectionTitle("SUMMARY")}\n${result.summary}`);
   console.log(`Status: ${result.status}`);
   console.log(
-    `Coverage: discovered=${result.coverage.discovered}, eligible=${result.coverage.eligible}, attempted=${result.coverage.attempted}, reviewed=${result.coverage.reviewed}, failed=${result.coverage.failed}, skipped=${result.coverage.skipped}, truncated=${result.coverage.truncated}`,
+    `Coverage: discovered=${result.coverage.discovered}, eligible=${result.coverage.eligible}, attempted=${result.coverage.attempted}, reviewed=${result.coverage.reviewed}, failed=${result.coverage.failed}, skipped=${result.coverage.skipped}, omitted=${result.coverage.omitted}, truncated=${result.coverage.truncated}`,
   );
   if (result.abstentions.length)
     console.log(`Abstentions: ${result.abstentions.length}`);

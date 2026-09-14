@@ -11,9 +11,17 @@ export function validateFindings(
   segment: PatchSegment,
   contexts: ContextChunk[],
 ): ReviewerFinding[] {
-  const changed = new Set<number>();
-  for (const range of segment.lineRanges)
-    for (let line = range.start; line <= range.end; line++) changed.add(line);
+  const changed = new Set(
+    segment.lineMappings
+      .filter(
+        (line) =>
+          line.kind === "addition" &&
+          line.complete &&
+          line.newLine !== undefined &&
+          line.newLine > 0,
+      )
+      .map((line) => line.newLine!),
+  );
   const contextById = new Map(contexts.map((chunk) => [chunk.id, chunk]));
   const findings: ReviewerFinding[] = [];
   for (const raw of response.findings) {
@@ -23,6 +31,7 @@ export function validateFindings(
         const context = contextById.get(item.contextId);
         if (
           !context ||
+          !context.contentComplete ||
           context.path !== item.path ||
           item.startLine < context.startLine ||
           item.endLine > context.endLine
@@ -30,8 +39,12 @@ export function validateFindings(
           valid = false;
       } else if (
         item.path !== filename ||
-        !changed.has(item.startLine) ||
-        !changed.has(item.endLine)
+        item.startLine <= 0 ||
+        item.endLine <= 0 ||
+        Array.from(
+          { length: item.endLine - item.startLine + 1 },
+          (_, index) => item.startLine + index,
+        ).some((line) => !changed.has(line))
       )
         valid = false;
       return {

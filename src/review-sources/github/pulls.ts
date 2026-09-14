@@ -9,9 +9,11 @@ export async function getPullRequest(
   repo: string,
   number: number,
   request: GithubRequester = githubRequest,
+  signal?: AbortSignal,
 ): Promise<PullRequestResponse> {
   return request(
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`,
+    signal,
   );
 }
 export async function getPullRequestFiles(
@@ -20,6 +22,7 @@ export async function getPullRequestFiles(
   number: number,
   expected?: number,
   request: GithubRequester = githubRequest,
+  signal?: AbortSignal,
 ): Promise<PullRequestFile[]> {
   const files: PullRequestFile[] = [];
   for (
@@ -29,6 +32,7 @@ export async function getPullRequestFiles(
   ) {
     const batch = await request<PullRequestFile[]>(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/files?per_page=${PAGE_SIZE}&page=${page}`,
+      signal,
     );
     files.push(...batch);
     if (batch.length < PAGE_SIZE) break;
@@ -44,10 +48,12 @@ async function trustedIgnore(
   repo: string,
   baseSha: string,
   request: GithubRequester,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   try {
     const response = await request<{ content?: string; encoding?: string }>(
       `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/.ai-reviewer-ignore?ref=${encodeURIComponent(baseSha)}`,
+      signal,
     );
     return response.content && response.encoding === "base64"
       ? Buffer.from(response.content.replace(/\n/g, ""), "base64").toString(
@@ -66,11 +72,12 @@ export async function getGithubReviewSource(
   repo: string,
   number: number,
   request: GithubRequester = githubRequest,
+  signal?: AbortSignal,
 ): Promise<ReviewSource> {
-  const pr = await getPullRequest(owner, repo, number, request);
+  const pr = await getPullRequest(owner, repo, number, request, signal);
   const [files, policy] = await Promise.all([
-    getPullRequestFiles(owner, repo, number, pr.changed_files, request),
-    trustedIgnore(owner, repo, pr.base.sha, request),
+    getPullRequestFiles(owner, repo, number, pr.changed_files, request, signal),
+    trustedIgnore(owner, repo, pr.base.sha, request, signal),
   ]);
   return {
     mode: "pr",

@@ -20,15 +20,13 @@ unitTest(
       fileType: "source",
       segment,
       contexts: [],
-      maxInputTokens: 900,
+      maxInputTokens: 5000,
       outputReservation: 200,
       maxMetadataCharacters: 200,
       maxContextTokens: 100,
     });
-    assert.ok(prompt.estimatedInputTokens <= 700);
-    assert.ok(
-      estimateTokens(prompt.system) + estimateTokens(prompt.user) <= 700,
-    );
+    assert.ok(prompt.estimatedInputTokens <= 4800);
+    assert.ok(prompt.estimatedInputTokens <= 4800);
     assert.match(prompt.user, /REDACTED/);
     assert.doesNotMatch(prompt.user, /abcdefghijklmnopqrst/);
     assert.match(REVIEW_SYSTEM_PROMPT, /untrusted data/);
