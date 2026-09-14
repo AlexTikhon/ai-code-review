@@ -1,201 +1,123 @@
 # AI Code Reviewer
 
-A CLI tool for automated GitHub Pull Request review and local `git diff` review powered by an LLM.
+A privacy-conscious TypeScript CLI for reviewing GitHub pull-request diffs or local Git working-tree changes. It supports bounded LLM review, repository-context retrieval, JSON/SARIF output, local caching, and an offline evaluation baseline.
 
-The project fetches PR data from the GitHub API, runs changed files through a LangGraph-based review pipeline, and produces a concise summary plus structured findings for meaningful engineering issues in the diff.
+This is an engineering baseline, not a claim that model findings are correct or that the privacy heuristics detect every secret.
 
-## What It Does
+## Pipeline and modes
 
-- Fetches Pull Request metadata
-- Fetches all changed PR files with pagination
-- Reviews local working tree changes without creating a PR
-- Classifies files by type
-- Supports `.ai-reviewer-ignore` patterns for skipping user-selected paths
-- Filters out files that are not suitable for review
-- Analyzes diffs with an LLM using structured output
-- Streams progress and findings to the CLI while the graph is running
-- Returns a summary and a list of findings with severity, category, confidence, and line hints
+The source-neutral pipeline is `ingest → filter/policy → retrieve → analyze/finalize`.
 
-## Pipeline
+- Local mode collects tracked and untracked changes relative to `HEAD` or the merge-base of `--base`. Git output is NUL-delimited and external diff/textconv helpers are disabled.
+- PR mode fetches immutable base/head SHAs and verifies the number of files returned against GitHub's `changed_files`. The `.ai-reviewer-ignore` policy is read from the trusted base SHA.
+- `--context diff` sends only bounded diff segments.
+- `--context lexical` (default) indexes the local checkout and combines keyword, symbol, and import lookup.
+- `--context hybrid` adds OpenAI embeddings when separately permitted. If embeddings are not permitted it reports that semantic retrieval was unavailable and uses lexical/symbol evidence.
 
-The graph is defined in [src/graph/reviewer.graph.ts](c:/ForMe/Learning/ai-code-reviewer/src/graph/reviewer.graph.ts) and consists of four steps:
+GitHub repository retrieval needs `--repo <checkout>` with `HEAD` exactly equal to the PR head SHA. Otherwise the result explicitly reports a diff-only fallback.
 
-1. `fetchPR`
-   Fetches PR metadata and the full list of changed files from GitHub.
-2. `filterFiles`
-   Classifies files, selects reviewable patch-based files, and records skipped files with explicit reasons.
-3. `analyze`
-   Sends each selected file to the LLM and collects structured findings. Failures are handled per file, so one bad response does not fail the entire run.
-4. `finalize`
-   Builds the final summary, including findings counts and skipped file counts.
+## Install and verify
 
-## Project Structure
-
-- [src/cli.ts](c:/ForMe/Learning/ai-code-reviewer/src/cli.ts) - thin entry point
-- [src/cli/](c:/ForMe/Learning/ai-code-reviewer/src/cli) - argument parsing, console styling, output formatting, and review runner
-- [src/review/](c:/ForMe/Learning/ai-code-reviewer/src/review) - review domain types, ignore rules, file classification, and patch helpers
-- [src/review-sources/](c:/ForMe/Learning/ai-code-reviewer/src/review-sources) - GitHub and local diff adapters that produce review input files
-- [src/graph/](c:/ForMe/Learning/ai-code-reviewer/src/graph) - LangGraph state and orchestration nodes
-- [src/prompts/review.ts](c:/ForMe/Learning/ai-code-reviewer/src/prompts/review.ts) - review prompt construction
-- [src/schemas/review.schema.ts](c:/ForMe/Learning/ai-code-reviewer/src/schemas/review.schema.ts) - structured output schema
-
-## Requirements
-
-- Node.js 20+
-- `GITHUB_TOKEN` for GitHub API access
-- `OPENAI_API_KEY` for model access
-
-## Installation
+Requires Node.js 20+ and Git.
 
 ```bash
-npm install
+npm ci
+npm run typecheck
+npm run build
+npm test
+npm run eval
 ```
 
-## Environment Variables
+Help, dry-run, index construction, tests, and deterministic evaluation require no provider key.
 
-Create a `.env` file or export these variables:
+## Privacy and transmission policy
+
+External transmission is denied by default. A model call requires both `AI_REVIEW_ALLOW_EXTERNAL=true` and `--allow-external`. Embeddings additionally require `AI_REVIEW_ALLOW_EMBEDDINGS=true`. LangSmith/LangChain tracing flags are rejected. Copy [.env.example](.env.example) for safe defaults.
+
+Mandatory path rules block `.env` variants, private keys, common credential files, and selected credential directories before user ignore rules. A `!` rule cannot re-include them. Diffs and indexed source are also checked for a bounded set of credential patterns; matching files are blocked, while matching PR metadata is redacted. Symlinks are rejected and resolved paths must remain inside the repository. These safeguards reduce accidental disclosure but are not a general-purpose secret scanner and provide no universal guarantee.
+
+`.ai-reviewer-ignore` uses gitignore semantics. Missing files mean no user rules; other read failures are operational errors. Local policy resolves from the Git root. PR policy comes from the immutable base revision, not the proposed PR contents. Exclusions are applied before untracked files are read.
+
+Use a dry run before allowing transmission:
+
+```bash
+npm run build
+node dist/src/cli.js --local --dry-run --format json
+```
+
+The manifest lists proposed files, omissions, destinations, and estimated requests/tokens without raw code or secrets and makes zero model/embedding calls.
+
+## Commands
+
+```bash
+# Build
+npm run build
+
+# Offline tests and deterministic evaluation
+npm test
+npm run eval
+
+# Dry-run a local review
+node dist/src/cli.js --local --dry-run --format json
+
+# Build/update a lexical repository index
+node dist/src/cli.js --local --index --context lexical
+
+# Local review (PowerShell setup shown)
+$env:AI_REVIEW_ALLOW_EXTERNAL="true"
+$env:OPENAI_API_KEY="..."
+node dist/src/cli.js --local --context lexical --allow-external
+
+# Local hybrid review (separate embedding consent)
+$env:AI_REVIEW_ALLOW_EMBEDDINGS="true"
+node dist/src/cli.js --local --context hybrid --allow-external --format sarif
+
+# GitHub PR review; GITHUB_TOKEN is also required
+node dist/src/cli.js owner repo 123 --context diff --allow-external --format json
+
+# PR review with revision-correct local context
+node dist/src/cli.js owner repo 123 --repo C:\path\to\pr-head-checkout --context lexical --allow-external
+```
+
+Use `--base main` in local mode, `--severity-threshold high|medium|low|none`, and `--format text|json|sarif`. Unknown, duplicate, missing-value, and conflicting arguments fail with exit 64.
+
+## Results and exit codes
+
+Statuses:
+
+- `complete`: every eligible scheduled diff segment was validly reviewed; no coverage truncation occurred.
+- `partial`: some useful review exists but a file failed, source coverage is incomplete, content was truncated, or all discovered files were skipped.
+- `failed`: fatal ingestion/configuration failure, or eligible input produced no completed review.
+
+Coverage fields have documented definitions in the JSON schema/type: `discovered`, `eligible`, `attempted`, `reviewed`, `failed`, `skipped`, and `truncated`. A failed or wholly unreviewed input is never called clean.
+
+Exit codes are `0` for a complete result below the configured finding threshold, `1` for a complete result meeting/exceeding the threshold, `2` for failed/partial operational or incomplete review, and `64` for CLI usage errors. Dry-run/index return `0` unless their operation fails.
+
+JSON uses schema version `1.0.0`. SARIF 2.1.0 includes result status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
+
+Valid insufficient-evidence responses are recorded as explicit per-segment abstentions and still count as completed review coverage; they are not findings.
+
+## Configuration
+
+The model remains configurable and defaults to `gpt-4o-mini`. Important bounds include:
 
 ```env
-GITHUB_TOKEN=your_github_token
-OPENAI_API_KEY=your_openai_api_key
+AI_REVIEW_MAX_INPUT_TOKENS=8000
+AI_REVIEW_MAX_OUTPUT_TOKENS=1200
+AI_REVIEW_MAX_PATCH_TOKENS=4000
+AI_REVIEW_MAX_CONTEXT_TOKENS=1800
+AI_REVIEW_MAX_SEGMENTS_PER_FILE=4
+AI_REVIEW_MAX_FILES=100
+AI_REVIEW_MAX_REQUESTS=200
+AI_REVIEW_CONCURRENCY=2
+AI_REVIEW_REQUEST_TIMEOUT_MS=60000
+AI_REVIEW_TOTAL_TIMEOUT_MS=600000
+AI_REVIEW_MAX_ATTEMPTS=3
+AI_REVIEW_RETRIEVAL_CANDIDATES=20
+AI_REVIEW_RETRIEVAL_TOP_K=5
+AI_REVIEW_RELEVANCE_THRESHOLD=0.05
 ```
 
-## Ignore Rules
+Token estimates are conservative byte estimates; actual provider usage is recorded when supplied. The full system message, bounded metadata, diff, selected context, and output reservation must fit before the provider boundary. One retry layer handles transient failures and rate-limit backoff; authentication/configuration failures are permanent.
 
-Create a `.ai-reviewer-ignore` file in the repository root to skip files from review.
-
-- Empty lines and lines starting with `#` are ignored
-- `*`, `**`, and `?` glob patterns are supported
-- A trailing `/` matches a directory
-- `!pattern` re-includes files matched by an earlier ignore rule
-
-Example:
-
-```text
-dist/
-coverage/
-**/*.snap
-!src/critical-test.snap
-```
-
-## Usage
-
-PR review:
-
-```bash
-npm run review -- <owner> <repo> <pullNumber>
-```
-
-Example:
-
-```bash
-npm run review -- vercel next.js 12345
-```
-
-Local diff review against `HEAD`:
-
-```bash
-npm run review -- --local
-```
-
-Local diff review against a base branch or ref:
-
-```bash
-npm run review -- --local --base main
-```
-
-Local diff review for a different repository path:
-
-```bash
-npm run review -- --local --repo c:\path\to\repo
-```
-
-You can combine both:
-
-```bash
-npm run review -- --local --base main --repo c:\path\to\repo
-```
-
-While the review is running, the CLI prints progress lines such as:
-
-```text
-[review] Starting local diff review against HEAD...
-[fetch] Collecting local git diff...
-[fetch] Found 6 changed local file(s).
-[analyze] Reviewing 4 file(s); skipped 2.
-[analyze] (1/4) src/cli.ts
-[finding] #1 src/cli.ts Conflicting local flags are not rejected explicitly (low, maintainability, confidence=medium)
-```
-
-## Example CLI Output
-
-```text
-=== SUMMARY ===
-
-Review completed. Findings: high=1, medium=1, low=0. Skipped files: 2.
-
-- src/api/user.ts: The new null handling branch still dereferences profile.id before checking whether profile exists.
-- src/config/app.config.ts: Configuration parsing is mostly safe, but missing validation for REVIEW_TIMEOUT_MS can lead to NaN values at runtime.
-- package-lock.json: skipped (unsupported_file_type, File classified as lockfile.)
-- dist/generated-client.js: skipped (generated_file, Generated artifact or snapshot file.)
-
-=== FINDINGS ===
-
-1. [HIGH] src/api/user.ts
-   Null check happens after property access (correctness, confidence=high)
-   The patch reads profile.id before guarding against profile being undefined, which can throw at runtime for users without a profile.
-   Line hint: @@ -48,7 +48,9 @@
-   Suggestion: Move the null/undefined guard before the property access and return early when profile is absent.
-
-2. [MEDIUM] src/config/app.config.ts
-   REVIEW_TIMEOUT_MS is parsed without validation (error-handling, confidence=medium)
-   Number(process.env.REVIEW_TIMEOUT_MS) can produce NaN, and the current patch does not validate that before using it in timeout logic.
-   Line hint: added env parsing block
-   Suggestion: Validate the parsed value and fall back to a safe default if it is missing or invalid.
-```
-
-Local diff example:
-
-```text
-=== SUMMARY ===
-
-Review completed. Findings: high=0, medium=1, low=1. Categories: error-handling=1, maintainability=1. Skipped files: 0. Skipped reasons: none.
-
-- src/graph/nodes/analyze.node.ts: Error handling improved, but the new catch branch loses the original cause in one code path.
-- src/cli.ts: Argument parsing is mostly clear, though the local mode branch still allows conflicting flags silently.
-
-=== REVIEW TARGET ===
-
-Local git diff against HEAD
-
-=== FINDINGS ===
-
-1. [MEDIUM] src/graph/nodes/analyze.node.ts
-   Wrapped error loses original cause (error-handling, confidence=medium)
-   The patch converts an unknown error into a generic message without preserving the original cause, which makes later debugging harder.
-   Line hint: catch block in analyzeNode
-   Suggestion: Include the original error message or attach it as a cause when building the final error string.
-
-2. [LOW] src/cli.ts
-   Conflicting local flags are not rejected explicitly (maintainability, confidence=medium)
-   The local CLI path accepts combinations of flags that may be ambiguous to future users and harder to extend safely.
-   Line hint: parseArgs local branch
-   Suggestion: Validate mutually exclusive flags up front and fail with a clear usage message.
-```
-
-## Output Format
-
-The CLI prints:
-
-- `SUMMARY` - the overall review result, including skipped files and per-file notes
-- `FINDINGS` - the list of detected issues
-
-Each finding contains:
-
-- `severity`: `high | medium | low`
-- `category`: `correctness | security | performance | type-safety | error-handling | maintainability`
-- `confidence`: `high | medium | low`
-- `title`
-- `explanation`
-- `lineHint` - a short pointer to the relevant line or diff hunk when available
-- `suggestion` - optional remediation guidance
+See [architecture decisions](docs/ARCHITECTURE.md) and [evaluation details](docs/EVALUATION.md).

@@ -1,34 +1,42 @@
+#!/usr/bin/env node
 import "dotenv/config";
-import { errorLabel } from "./cli/console.js";
-import { parseArgs } from "./cli/args.js";
-import { printReviewResult, printReviewStart, printUsage } from "./cli/output.js";
+import { parseArgs, EXIT_SUCCESS, EXIT_USAGE } from "./cli/args.js";
+import {
+  printReviewResult,
+  printUsage,
+  resultExitCode,
+  stderrEvent,
+} from "./cli/output.js";
 import { runReview } from "./cli/run-review.js";
-import type { CliArgs } from "./cli/args.js";
-
-function exitWithUsage(message: string): never {
-	console.error(`${errorLabel("[error]")} ${message}`);
-	printUsage();
-	process.exit(1);
+async function main(): Promise<void> {
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    console.error(
+      `[error] ${error instanceof Error ? error.message : String(error)}`,
+    );
+    printUsage();
+    process.exitCode = EXIT_USAGE;
+    return;
+  }
+  if (args.help) {
+    printUsage();
+    process.exitCode = EXIT_SUCCESS;
+    return;
+  }
+  const result = await runReview(args, { events: stderrEvent });
+  printReviewResult(result, args.format);
+  process.exitCode =
+    args.dryRun || args.indexOnly
+      ? result.status === "failed"
+        ? 2
+        : 0
+      : resultExitCode(result, args.severityThreshold);
 }
-
-function parseArgsOrExit(argv: string[]): CliArgs {
-	try {
-		return parseArgs(argv);
-	} catch (error) {
-		return exitWithUsage(
-			error instanceof Error ? error.message : "Invalid arguments"
-		);
-	}
-}
-
-async function main() {
-	const args = parseArgsOrExit(process.argv.slice(2));
-	printReviewStart(args);
-	const result = await runReview(args);
-	printReviewResult(args, result);
-}
-
 main().catch((error) => {
-	console.error(`${errorLabel("[fatal]")} ${String(error)}`);
-	process.exit(1);
+  console.error(
+    `[fatal] ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+  );
+  process.exitCode = 2;
 });

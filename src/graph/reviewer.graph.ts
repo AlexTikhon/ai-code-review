@@ -1,20 +1,12 @@
-import { StateGraph, START, END } from "@langchain/langgraph";
-import { reviewerStateAnnotation } from "./state.js";
-import { fetchSourceNode } from "./nodes/fetch-source.node.js";
-import { filterFilesNode } from "./nodes/filter-files.node.js";
-import { analyzeNode } from "./nodes/analyze.node.js";
-import { finalizeNode } from "./nodes/finalize.node.js";
-
-export function createReviewerGraph() {
-	return new StateGraph(reviewerStateAnnotation)
-		.addNode("fetchSource", fetchSourceNode)
-		.addNode("filterFiles", filterFilesNode)
-		.addNode("analyze", analyzeNode)
-		.addNode("finalize", finalizeNode)
-		.addEdge(START, "fetchSource")
-		.addEdge("fetchSource", "filterFiles")
-		.addEdge("filterFiles", "analyze")
-		.addEdge("analyze", "finalize")
-		.addEdge("finalize", END)
-		.compile();
+import type { CliArgs } from "../cli/args.js";
+import {
+  runReviewPipeline,
+  type PipelineDependencies,
+} from "../review/pipeline.js";
+/**
+ * Compatibility facade. LangGraph added no branching/checkpoint value to this bounded CLI,
+ * so orchestration is an explicit four-stage pipeline with injected dependencies.
+ */
+export function createReviewerGraph(dependencies: PipelineDependencies = {}) {
+  return { invoke: (args: CliArgs) => runReviewPipeline(args, dependencies) };
 }

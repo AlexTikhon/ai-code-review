@@ -1,16 +1,17 @@
 export type PullRequestResponse = {
-	number: number;
-	title: string;
-	body: string | null;
-	base: { ref: string };
-	head: { ref: string };
+  number: number;
+  title: string;
+  body: string | null;
+  changed_files: number;
+  base: { ref: string; sha: string };
+  head: { ref: string; sha: string };
 };
-
 export type PullRequestFile = {
-	filename: string;
-	status: string;
-	additions: number;
-	deletions: number;
-	changes: number;
-	patch?: string;
+  filename: string;
+  previous_filename?: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch?: string;
 };

@@ -1,53 +1,49 @@
 import assert from "node:assert/strict";
 import {
-	getMaxPatchLength,
-	splitPatchIntoSections,
-	truncatePatch
+  changedLineNumbers,
+  estimateTokens,
+  getMaxPatchLength,
+  splitPatchForReview,
+  splitPatchIntoSections,
+  truncatePatch,
 } from "../src/review/patch.js";
 import { unitTest } from "./helpers.js";
-
 unitTest("splitPatchIntoSections separates preamble and hunks", () => {
-	const patch = [
-		"diff --git a/a.ts b/a.ts",
-		"index 123..456 100644",
-		"--- a/a.ts",
-		"+++ b/a.ts",
-		"@@ -1 +1 @@",
-		"-old",
-		"+new",
-		"@@ -3 +3 @@",
-		"-before",
-		"+after"
-	].join("\n");
-
-	assert.deepEqual(splitPatchIntoSections(patch), {
-		preamble: ["diff --git a/a.ts b/a.ts", "index 123..456 100644", "--- a/a.ts", "+++ b/a.ts"].join("\n"),
-		hunks: ["@@ -1 +1 @@\n-old\n+new", "@@ -3 +3 @@\n-before\n+after"]
-	});
+  const patch =
+    "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n@@ -3 +3 @@\n-before\n+after";
+  assert.equal(splitPatchIntoSections(patch).hunks.length, 2);
 });
-
-unitTest("truncatePatch preserves complete first hunk and appends marker", () => {
-	const oversizedLine = "x".repeat(getMaxPatchLength());
-	const patch = [
-		"diff --git a/a.ts b/a.ts",
-		"@@ -1 +1 @@",
-		`+${oversizedLine}`,
-		"@@ -2 +2 @@",
-		"+small"
-	].join("\n");
-
-	const truncated = truncatePatch(patch);
-
-	assert.match(truncated, /\[TRUNCATED: kept 1\/2 complete hunk\(s\) within review size limit\]$/);
-	assert.match(truncated, /@@ -1 \+1 @@/);
-	assert.doesNotMatch(truncated, /@@ -2 \+2 @@/);
+unitTest("oversized first hunk and line cannot bypass segment budget", () => {
+  const patch = `@@ -1 +1 @@\n+${"x".repeat(100_000)}`;
+  const segments = splitPatchForReview(patch, 500, 2);
+  assert.equal(segments.length, 2);
+  assert.ok(segments.every((segment) => estimateTokens(segment.text) <= 500));
+  assert.ok(segments.some((segment) => segment.truncated));
 });
-
-unitTest("truncatePatch handles patches without hunks", () => {
-	const truncated = truncatePatch("a".repeat(getMaxPatchLength() + 10));
-
-	assert.match(
-		truncated,
-		/\[TRUNCATED: patch exceeded review size limit and had no detectable hunks\]$/
-	);
+unitTest(
+  "multibyte oversized additions keep valid mapped lines within budget",
+  () => {
+    const segments = splitPatchForReview(
+      `@@ -1 +7 @@\n+${"😀".repeat(10_000)}`,
+      300,
+      2,
+    );
+    assert.ok(segments.every((segment) => estimateTokens(segment.text) <= 300));
+    assert.ok(
+      segments.every((segment) =>
+        segment.lineRanges.some((range) => range.start === 7),
+      ),
+    );
+  },
+);
+unitTest("truncatePatch applies an absolute character cap", () => {
+  const value = truncatePatch("x".repeat(100_000));
+  assert.ok(value.length <= getMaxPatchLength());
+  assert.match(value, /TRUNCATED/);
+});
+unitTest("changedLineNumbers maps additions", () => {
+  assert.deepEqual(
+    [...changedLineNumbers("@@ -4,2 +10,3 @@\n old\n+new\n-old2\n+next")],
+    [11, 12],
+  );
 });

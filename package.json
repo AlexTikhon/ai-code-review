@@ -2,21 +2,42 @@
   "name": "ai-code-reviewer",
   "version": "1.0.0",
   "type": "module",
+  "description": "Privacy-conscious CLI code reviewer with repository-context retrieval and offline evaluation",
+  "bin": {
+    "ai-code-reviewer": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "eval",
+    "README.md",
+    "docs",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "review": "tsx src/cli.ts",
-    "test": "tsc -p tsconfig.test.json && node .test-dist/test/run.js"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc -p tsconfig.test.json && node .test-dist/test/run.js",
+    "eval": "tsx src/eval/run.ts",
+    "eval:live": "tsx src/eval/live.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"docs/**/*.md\" \"eval/**/*.json\" \".github/**/*.yml\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"docs/**/*.md\" \"eval/**/*.json\" \".github/**/*.yml\"",
+    "prepack": "npm run build",
+    "audit": "npm audit"
   },
   "dependencies": {
-    "@langchain/core": "^0.3.0",
-    "@langchain/langgraph": "^0.2.0",
-    "@langchain/openai": "^0.5.0",
     "dotenv": "^16.4.0",
+    "ignore": "^7.0.9",
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
+    "@types/node": "^22.20.2",
+    "prettier": "^3.9.6",
+    "tsx": "^4.23.13",
     "typescript": "^5.8.0"
   }
 }

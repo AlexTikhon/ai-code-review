@@ -4,6 +4,7 @@ dist/
 coverage/
 .next/
 build/
+.ai-reviewer/cache/
 
 .env
 .env.*

@@ -1,28 +1,28 @@
 import assert from "node:assert/strict";
 import { parseArgs } from "../src/cli/args.js";
 import { unitTest } from "./helpers.js";
-
-unitTest("parseArgs parses PR review arguments", () => {
-	assert.deepEqual(parseArgs(["openai", "repo", "42"]), {
-		reviewMode: "pr",
-		owner: "openai",
-		repo: "repo",
-		pullNumber: 42
-	});
+unitTest("parseArgs parses strict PR and local modes", () => {
+  const pr = parseArgs(["openai", "repo", "42", "--format", "json"]);
+  assert.equal(pr.reviewMode, "pr");
+  assert.equal(pr.pullNumber, 42);
+  assert.equal(pr.format, "json");
+  const local = parseArgs(["--local", "--base", "main", "--repo", "C:\\repo"]);
+  assert.equal(local.reviewMode, "local");
+  assert.equal(local.localBaseRef, "main");
 });
-
-unitTest("parseArgs parses local review arguments", () => {
-	assert.deepEqual(parseArgs(["--local", "--base", "main", "--repo", "C:\\repo"]), {
-		reviewMode: "local",
-		localBaseRef: "main",
-		localRepoPath: "C:\\repo"
-	});
+unitTest("parseArgs rejects missing/flag values, unknown and conflicts", () => {
+  assert.throws(
+    () => parseArgs(["--local", "--base", "--repo", "x"]),
+    /--base requires a value/,
+  );
+  assert.throws(() => parseArgs(["--local", "--wat"]), /Unknown option/);
+  assert.throws(() => parseArgs(["owner", "repo", "1", "--local"]), /conflict/);
+  assert.throws(() => parseArgs(["owner", "repo", "1", "extra"]), /Expected/);
 });
-
-unitTest("parseArgs throws on missing base value", () => {
-	assert.throws(() => parseArgs(["--local", "--base"]), /--base requires a ref value/);
-});
-
-unitTest("parseArgs throws on invalid PR number", () => {
-	assert.throws(() => parseArgs(["openai", "repo", "abc"]), /pullNumber must be a number/);
+unitTest("parseArgs requires positive finite integer PR numbers", () => {
+  for (const value of ["abc", "Infinity", "0", "-1", "1.5"])
+    assert.throws(
+      () => parseArgs(["o", "r", value]),
+      /positive finite integer/,
+    );
 });
