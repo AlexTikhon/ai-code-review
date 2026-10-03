@@ -14,6 +14,15 @@ export class OpenAIReviewModel implements ReviewModel {
     private readonly apiKey = process.env.OPENAI_API_KEY,
     private readonly endpoint = "https://api.openai.com/v1/chat/completions",
   ) {}
+  /** Endpoint origin and path only: no credentials, query, or API key. */
+  get identity(): string {
+    try {
+      const url = new URL(this.endpoint);
+      return `openai-chat-completions/json-schema-v1@${url.origin}${url.pathname}`;
+    } catch {
+      return "openai-chat-completions/json-schema-v1@invalid-endpoint";
+    }
+  }
   async review(
     request: ModelRequest,
     signal: AbortSignal,

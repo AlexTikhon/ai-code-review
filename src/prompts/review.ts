@@ -97,14 +97,3 @@ export function assembleReviewPrompt(input: {
     context: selected,
   };
 }
-
-/** Compatibility helper retained for callers; new code uses separated messages. */
-export function buildReviewPrompt(input: {
-  prTitle: string;
-  prBody: string;
-  filename: string;
-  fileType: ReviewedFileType;
-  patch: string;
-}): string {
-  return `${REVIEW_SYSTEM_PROMPT}\n\n${assembleReviewPrompt({ title: input.prTitle, description: input.prBody, filename: input.filename, fileType: input.fileType, segment: { id: "legacy", text: input.patch, lineRanges: [], lineMappings: [], truncated: false }, contexts: [], maxInputTokens: 100000, outputReservation: 1, maxMetadataCharacters: 4000, maxContextTokens: 1 }).user}`;
-}

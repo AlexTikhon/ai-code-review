@@ -1,4 +1,5 @@
-import type { CliArgs } from "../cli/args.js";
+/** The only invocation fact configuration depends on; CliArgs satisfies it. */
+export type ConfigOptions = { allowExternal: boolean };
 export type ReviewConfig = {
   model: string;
   embeddingModel: string;
@@ -29,9 +30,9 @@ function positiveInt(name: string, fallback: number): number {
     throw new Error(`${name} must be a positive finite integer`);
   return value;
 }
-export function loadConfig(args: CliArgs): ReviewConfig {
+export function loadConfig(options: ConfigOptions): ReviewConfig {
   const allowed = process.env.AI_REVIEW_ALLOW_EXTERNAL === "true";
-  if (args.allowExternal && !allowed)
+  if (options.allowExternal && !allowed)
     throw new Error(
       "--allow-external also requires AI_REVIEW_ALLOW_EXTERNAL=true",
     );
@@ -49,9 +50,9 @@ export function loadConfig(args: CliArgs): ReviewConfig {
     model: process.env.AI_REVIEW_MODEL ?? "gpt-4o-mini",
     embeddingModel:
       process.env.AI_REVIEW_EMBEDDING_MODEL ?? "text-embedding-3-small",
-    allowExternal: args.allowExternal && allowed,
+    allowExternal: options.allowExternal && allowed,
     allowEmbeddings:
-      args.allowExternal &&
+      options.allowExternal &&
       allowed &&
       process.env.AI_REVIEW_ALLOW_EMBEDDINGS === "true",
     maxInputTokens: positiveInt("AI_REVIEW_MAX_INPUT_TOKENS", 8000),

@@ -4,6 +4,7 @@ import { unitTest } from "./helpers.js";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+const identity = { provider: "test", identity: "contract-v1" };
 unitTest(
   "review cache keys vary with patch, context, metadata and model configuration",
   () => {
@@ -13,21 +14,36 @@ unitTest(
       model: "gpt-4o-mini",
       maxOutputTokens: 100,
     };
-    const key = reviewCacheKey(base);
+    const key = reviewCacheKey(base, identity);
     assert.notEqual(
-      reviewCacheKey({ ...base, user: "metadata\npatch-b\ncontext-a" }),
+      reviewCacheKey(
+        { ...base, user: "metadata\npatch-b\ncontext-a" },
+        identity,
+      ),
       key,
     );
     assert.notEqual(
-      reviewCacheKey({ ...base, user: "other metadata\npatch-a\ncontext-a" }),
+      reviewCacheKey(
+        { ...base, user: "other metadata\npatch-a\ncontext-a" },
+        identity,
+      ),
       key,
     );
     assert.notEqual(
-      reviewCacheKey({ ...base, user: "metadata\npatch-a\ncontext-b" }),
+      reviewCacheKey(
+        { ...base, user: "metadata\npatch-a\ncontext-b" },
+        identity,
+      ),
       key,
     );
-    assert.notEqual(reviewCacheKey({ ...base, model: "another-model" }), key);
-    assert.notEqual(reviewCacheKey({ ...base, maxOutputTokens: 101 }), key);
+    assert.notEqual(
+      reviewCacheKey({ ...base, model: "another-model" }, identity),
+      key,
+    );
+    assert.notEqual(
+      reviewCacheKey({ ...base, maxOutputTokens: 101 }, identity),
+      key,
+    );
   },
 );
 

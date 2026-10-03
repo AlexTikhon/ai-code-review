@@ -1,14 +1,16 @@
-import { embeddingInputHash } from "./index-store.js";
 import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
+import {
+  findStoredVector,
+  isPreparedIndex,
+  lexicalTokens,
+  prepareRepositoryIndex,
+  type PreparedRepositoryIndex,
+} from "./prepared-index.js";
 import type {
   ContextChunk,
   RepositoryIndex,
   RetrievalCandidate,
-  StoredVector,
 } from "./types.js";
-
-const tokens = (value: string) =>
-  new Set(value.toLowerCase().match(/[a-z_$][\w$]{2,}/g) ?? []);
 
 function cosine(a: number[], b: number[]): number {
   if (a.length !== b.length)
@@ -26,27 +28,15 @@ function cosine(a: number[], b: number[]): number {
   return aa && bb ? dot / Math.sqrt(aa * bb) : 0;
 }
 
-function vectorFor(
-  index: RepositoryIndex,
-  chunk: ContextChunk,
-  embedding: EmbeddingAdapter,
-): StoredVector | undefined {
-  const inputHash = embeddingInputHash(chunk);
-  return Object.values(index.vectors).find(
-    (vector) =>
-      vector.inputHash === inputHash &&
-      vector.provider === embedding.provider &&
-      vector.model === embedding.model &&
-      vector.version === embedding.version &&
-      vector.dimensionIdentity ===
-        String(embedding.dimensions ?? "provider-default") &&
-      vector.chunkerVersion === index.chunkerVersion &&
-      vector.maxChunkTokens === index.maxChunkTokens,
-  );
-}
-
+/**
+ * Rank repository chunks for one review segment.
+ *
+ * Pass a PreparedRepositoryIndex to reuse tokenization and vector lookup across
+ * segments; a raw RepositoryIndex is prepared on the fly (one O(chunks +
+ * vectors) pass) so one-off callers keep working.
+ */
 export async function retrieveContext(input: {
-  index: RepositoryIndex;
+  index: RepositoryIndex | PreparedRepositoryIndex;
   repositoryId: string;
   revision: string;
   query: string;
@@ -67,21 +57,22 @@ export async function retrieveContext(input: {
       "Repository context index is stale or belongs to a different repository/revision",
     );
   input.signal?.throwIfAborted();
-  const queryTokens = tokens(input.query);
-  const lexical = input.index.chunks
-    .map((chunk) => {
-      const haystack = tokens(
-        `${chunk.path} ${chunk.name ?? ""} ${chunk.signature ?? ""} ${chunk.imports.join(" ")} ${chunk.content}`,
-      );
+  const index = isPreparedIndex(input.index)
+    ? input.index
+    : prepareRepositoryIndex(input.index);
+  const queryTokens = lexicalTokens(input.query);
+  const lexical = index.chunks
+    .map((prepared) => {
+      const { chunk } = prepared;
       let overlap = 0;
-      for (const token of queryTokens) if (haystack.has(token)) overlap++;
-      const importBoost = chunk.imports.some((item) =>
-        input.changedPath.includes(item.replace(/^\.\//, "")),
+      for (const token of queryTokens) if (prepared.terms.has(token)) overlap++;
+      const importBoost = prepared.importNeedles.some((needle) =>
+        input.changedPath.includes(needle),
       )
         ? 0.2
         : 0;
       const symbolBoost =
-        chunk.name && queryTokens.has(chunk.name.toLowerCase()) ? 0.35 : 0;
+        prepared.nameTerm && queryTokens.has(prepared.nameTerm) ? 0.35 : 0;
       const sameFileBoost = chunk.path === input.changedPath ? 0.05 : 0;
       const score = Math.min(
         1,
@@ -112,8 +103,8 @@ export async function retrieveContext(input: {
       input.embedding.dimensions,
     );
     const queryVector = vectors[0]!;
-    for (const chunk of input.index.chunks) {
-      const stored = vectorFor(input.index, chunk, input.embedding);
+    for (const prepared of index.chunks) {
+      const stored = findStoredVector(index, prepared, input.embedding);
       if (!stored) continue;
       if (
         stored.dimensions !== dimensions ||
@@ -124,7 +115,7 @@ export async function retrieveContext(input: {
         );
       const score = Math.max(0, cosine(queryVector, stored.values));
       semantic.push({
-        chunk,
+        chunk: prepared.chunk,
         score,
         reasons: [`semantic:${score.toFixed(3)}`],
       });

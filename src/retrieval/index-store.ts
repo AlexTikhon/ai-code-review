@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { writeFileAtomic } from "../cache/atomic-write.js";
 import {
   assertContainedRegularFile,
   inspectSensitiveContent,
@@ -16,6 +17,7 @@ import {
   type StoredVector,
 } from "./types.js";
 import { chunkSource } from "./chunker.js";
+import { parseRepositoryIndex } from "./index-schema.js";
 import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
 
 const execFileAsync = promisify(execFile);
@@ -26,15 +28,71 @@ export function indexPath(root: string, cacheDirName: string): string {
   return join(root, cacheDirName, "repository-index.json");
 }
 
-export async function loadIndex(
+/**
+ * Outcome of reading the persisted index. Nothing here is trusted until it has
+ * passed the runtime schema:
+ * - missing: no file; build from scratch.
+ * - corrupt: unreadable, not JSON, or schema/consistency violation.
+ * - stale:   structurally valid but built by an incompatible chunker/budget
+ *            (or for a different repository/revision when the caller requires
+ *            an exact match).
+ * Corrupt and stale files are derived data, so callers rebuild from source and
+ * report the reason instead of reusing anything from them.
+ */
+export type IndexLoadResult =
+  | { status: "missing" }
+  | { status: "valid"; index: RepositoryIndex }
+  | { status: "corrupt"; reason: string }
+  | { status: "stale"; reason: string };
+
+export type IndexExpectation = {
+  chunkerVersion?: string;
+  maxChunkTokens?: number;
+  repositoryId?: string;
+  revision?: string;
+};
+
+export async function readIndex(
   path: string,
-): Promise<RepositoryIndex | undefined> {
+  expected: IndexExpectation = {},
+): Promise<IndexLoadResult> {
+  let text: string;
   try {
-    return JSON.parse(await readFile(path, "utf8")) as RepositoryIndex;
+    text = await readFile(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return { status: "missing" };
+    return {
+      status: "corrupt",
+      reason: `index file is unreadable (${(error as NodeJS.ErrnoException).code ?? "unknown error"})`,
+    };
   }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { status: "corrupt", reason: "index file is not valid JSON" };
+  }
+  const parsed = parseRepositoryIndex(raw);
+  if (!parsed.ok) return { status: "corrupt", reason: parsed.reason };
+  const { index } = parsed;
+  const mismatch =
+    expected.chunkerVersion !== undefined &&
+    index.chunkerVersion !== expected.chunkerVersion
+      ? `chunker version ${index.chunkerVersion} != ${expected.chunkerVersion}`
+      : expected.maxChunkTokens !== undefined &&
+          index.maxChunkTokens !== expected.maxChunkTokens
+        ? `max chunk tokens ${index.maxChunkTokens} != ${expected.maxChunkTokens}`
+        : expected.repositoryId !== undefined &&
+            index.repositoryId !== expected.repositoryId
+          ? "repository identity differs"
+          : expected.revision !== undefined &&
+              index.revision !== expected.revision
+            ? "revision differs"
+            : undefined;
+  return mismatch
+    ? { status: "stale", reason: mismatch }
+    : { status: "valid", index };
 }
 
 export function normalizedEmbeddingInput(chunk: ContextChunk): string {
@@ -156,11 +214,27 @@ export async function buildRepositoryIndex(input: {
   signal?: AbortSignal;
   beforeEmbeddingRequest?: () => void;
   onEmbeddingRequest?: () => void;
+  /** Receives a safe, value-free reason when a persisted index is discarded. */
+  onDiagnostic?: (message: string) => void;
   maxEmbeddingBatchSize?: number;
 }): Promise<RepositoryIndex> {
   input.signal?.throwIfAborted();
   const path = indexPath(input.root, input.cacheDirName);
-  const old = await loadIndex(path);
+  // Chunks are always regenerated from source; only compatible vectors carry
+  // over. A corrupt or stale file therefore costs a re-embed, never correctness.
+  const loaded = await readIndex(path, {
+    chunkerVersion: CHUNKER_VERSION,
+    maxChunkTokens: input.maxChunkTokens,
+  });
+  if (loaded.status === "corrupt")
+    input.onDiagnostic?.(
+      `Persisted repository index was unusable (${loaded.reason}); rebuilt from source.`,
+    );
+  else if (loaded.status === "stale")
+    input.onDiagnostic?.(
+      `Persisted repository index was stale (${loaded.reason}); rebuilt from source.`,
+    );
+  const old = loaded.status === "valid" ? loaded.index : undefined;
   const entries: IndexEntry[] = input.gitRevision
     ? await revisionEntries(input.root, input.gitRevision, input.signal)
     : (await workingTreeNames(input.root, input.signal)).map((name) => ({
@@ -278,12 +352,6 @@ export async function buildRepositoryIndex(input: {
     chunks,
     vectors,
   };
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, JSON.stringify(index), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await rename(temporary, path);
+  await writeFileAtomic(path, JSON.stringify(index));
   return index;
 }

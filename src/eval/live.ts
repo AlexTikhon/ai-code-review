@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import type { CliArgs } from "../cli/args.js";
-import { runReviewPipeline } from "../review/pipeline.js";
+import { runReview } from "../cli/run-review.js";
 import type { ReviewSource } from "../review/types.js";
 
 type Example = {
@@ -105,7 +105,7 @@ async function main() {
         ],
         coverageComplete: true,
       };
-      const result = await runReviewPipeline(args, { source });
+      const result = await runReview(args, { source });
       const findingText = result.findings
         .map((finding) => `${finding.title} ${finding.explanation}`)
         .join("\n");

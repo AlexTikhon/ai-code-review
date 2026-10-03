@@ -12,7 +12,21 @@ import "./git-integration.test.js";
 import "./github.test.js";
 import "./prompt.test.js";
 import "./cache.test.js";
+import "./concurrency.test.js";
+import "./pipeline-architecture.test.js";
+import "./index-store.test.js";
+import "./prepared-retrieval.test.js";
 import { getTestCases } from "./helpers.js";
+
+let completed = false;
+// A test that awaits something nothing keeps alive would otherwise let Node
+// exit 0 mid-run with no summary; treat an incomplete run as a failure.
+process.on("exit", (code) => {
+  if (!completed && code === 0) {
+    console.error("FAIL test run ended before all tests completed");
+    process.exitCode = 1;
+  }
+});
 
 async function main() {
   const testCases = getTestCases();
@@ -29,6 +43,7 @@ async function main() {
     }
   }
 
+  completed = true;
   console.log(
     `\n${testCases.length - failed}/${testCases.length} tests passed`,
   );

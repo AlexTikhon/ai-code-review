@@ -6,7 +6,7 @@ This is an engineering baseline, not a claim that model findings are correct or 
 
 ## Pipeline and modes
 
-The source-neutral pipeline is `ingest → filter/policy → retrieve → analyze/finalize`.
+The source-neutral pipeline is `ingest → filter/policy → repository context → analyze → finalize`; each stage is a separate module described in [architecture decisions](docs/ARCHITECTURE.md). A corrupt or stale repository index cache is validated, rebuilt from source, and reported in `context.message` rather than trusted.
 
 - Local mode collects tracked and untracked changes relative to `HEAD` or the merge-base of `--base`. Git output is NUL-delimited and external diff/textconv helpers are disabled.
 - PR mode fetches immutable base/head SHAs and verifies the number of files returned against GitHub's `changed_files`. The `.ai-reviewer-ignore` policy is read from the trusted base SHA.

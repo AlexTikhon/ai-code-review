@@ -1,17 +1,33 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import type { ModelResult, ModelRequest } from "../model/types.js";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import type {
+  ModelIdentity,
+  ModelRequest,
+  ModelResult,
+} from "../model/types.js";
 import { reviewResponseSchema } from "../schemas/review.schema.js";
 import { z } from "zod";
 import { POLICY_VERSION, PROMPT_VERSION } from "../review/types.js";
-export function reviewCacheKey(request: ModelRequest): string {
+import { writeFileAtomic } from "./atomic-write.js";
+
+/**
+ * Cache identity = exact request + the provider contract that answers it.
+ * `request.model` is only a provider-local model name; two providers can share
+ * a name, so provider and contract identity are part of the key.
+ */
+export function reviewCacheKey(
+  request: ModelRequest,
+  model: ModelIdentity,
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
         request,
+        provider: model.provider,
+        providerIdentity: model.identity ?? null,
         promptVersion: PROMPT_VERSION,
-        schemaVersion: "review-v2",
+        schemaVersion: "review-v3",
         policyVersion: POLICY_VERSION,
       }),
     )
@@ -41,8 +57,8 @@ export async function readReviewCache(
         ),
       );
     return parsed.success ? parsed.data : undefined;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+  } catch {
+    // Missing, unreadable, or malformed entries are plain cache misses.
     return undefined;
   }
 }
@@ -52,12 +68,8 @@ export async function writeReviewCache(
   key: string,
   value: ModelResult,
 ): Promise<void> {
-  const path = join(root, cacheDir, "reviews", `${key}.json`);
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, JSON.stringify(value), {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await rename(temporary, path);
+  await writeFileAtomic(
+    join(root, cacheDir, "reviews", `${key}.json`),
+    JSON.stringify(value),
+  );
 }

@@ -3,6 +3,7 @@ export const PROMPT_VERSION = "3.0.0";
 export const POLICY_VERSION = "1.1.0";
 
 export type ReviewStatus = "complete" | "partial" | "failed";
+export type ContextMode = "diff" | "lexical" | "hybrid";
 export type FindingSeverity = "high" | "medium" | "low";
 export type FindingCategory =
   | "correctness"
@@ -161,7 +162,7 @@ export type ReviewResult = {
   errors: ReviewError[];
   usage: Usage;
   context: {
-    mode: "diff" | "lexical" | "hybrid";
+    mode: ContextMode;
     state: "used" | "unavailable" | "stale" | "disabled";
     selected: ContextUse[];
     message?: string;
@@ -180,4 +181,3 @@ export type ReviewResult = {
     estimatedInputTokens: number;
   };
 };
-export type FilteredFile = ReviewableFile;

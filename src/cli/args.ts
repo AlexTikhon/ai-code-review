@@ -1,6 +1,6 @@
-import type { FindingSeverity } from "../review/types.js";
+import type { ContextMode, FindingSeverity } from "../review/types.js";
+export type { ContextMode };
 export type OutputFormat = "text" | "json" | "sarif";
-export type ContextMode = "diff" | "lexical" | "hybrid";
 type CommonArgs = {
   format: OutputFormat;
   dryRun: boolean;

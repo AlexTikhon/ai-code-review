@@ -1,8 +1,16 @@
 export type ExternalRequestKind = "model" | "embedding";
 
-/** Synchronous reservation makes the limit atomic across concurrent promises. */
+/**
+ * The single place where external provider calls are counted and capped.
+ * Synchronous reservation makes the limit atomic across concurrent promises:
+ * a reservation either succeeds before the call starts or throws.
+ */
 export class ExternalRequestBudget {
   private used = 0;
+  private readonly byKind: Record<ExternalRequestKind, number> = {
+    model: 0,
+    embedding: 0,
+  };
 
   constructor(
     private readonly limit: number,
@@ -17,10 +25,16 @@ export class ExternalRequestBudget {
         `External request budget ${this.limit} exhausted before ${kind} call`,
       );
     this.used++;
+    this.byKind[kind]++;
     this.onReserve?.(kind);
   }
 
+  /** Every reserved external call, model attempts and embedding calls alike. */
   get consumed(): number {
     return this.used;
+  }
+
+  consumedBy(kind: ExternalRequestKind): number {
+    return this.byKind[kind];
   }
 }
