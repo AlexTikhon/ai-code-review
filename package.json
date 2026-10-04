@@ -9,6 +9,7 @@
   "files": [
     "dist/src",
     "eval",
+    "!eval/results",
     "README.md",
     "docs",
     ".env.example"
@@ -24,13 +25,14 @@
     "test": "tsc -p tsconfig.test.json && node .test-dist/test/run.js",
     "eval": "tsx src/eval/run.ts",
     "eval:live": "tsx src/eval/live.ts",
-    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"docs/**/*.md\" \"eval/**/*.json\" \".github/**/*.yml\"",
     "bench": "tsx src/bench/retrieval.ts",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"docs/**/*.md\" \"eval/**/*.json\" \".github/**/*.yml\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"docs/**/*.md\" \"eval/**/*.json\" \".github/**/*.yml\"",
     "prepack": "npm run build",
     "audit": "npm audit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
     "dotenv": "^16.4.0",
     "ignore": "^7.0.9",
     "typescript": "^5.8.0",

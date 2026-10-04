@@ -41,67 +41,75 @@ export const reviewResponseSchema = z
   );
 export type ReviewResponse = z.infer<typeof reviewResponseSchema>;
 
+/**
+ * Provider-neutral JSON Schema for ReviewResponse. Adapters translate it to
+ * their provider's structured-output dialect; reviewResponseSchema (zod)
+ * remains the single runtime validator for every provider.
+ */
+export const REVIEW_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["findings", "summary", "abstained", "abstentionReason"],
+  properties: {
+    findings: {
+      type: "array",
+      maxItems: 25,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "severity",
+          "category",
+          "confidence",
+          "title",
+          "explanation",
+          "evidence",
+          "suggestion",
+        ],
+        properties: {
+          severity: { enum: ["high", "medium", "low"] },
+          category: {
+            enum: [
+              "correctness",
+              "security",
+              "performance",
+              "type-safety",
+              "error-handling",
+              "maintainability",
+            ],
+          },
+          confidence: { enum: ["low", "medium", "high"] },
+          title: { type: "string" },
+          explanation: { type: "string" },
+          evidence: {
+            type: "array",
+            minItems: 1,
+            maxItems: 5,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["path", "startLine", "endLine", "contextId"],
+              properties: {
+                path: { type: "string" },
+                startLine: { type: "integer" },
+                endLine: { type: "integer" },
+                contextId: { type: ["string", "null"] },
+              },
+            },
+          },
+          suggestion: { type: ["string", "null"] },
+        },
+      },
+    },
+    summary: { type: "string" },
+    abstained: { type: "boolean" },
+    abstentionReason: { type: ["string", "null"] },
+  },
+} as const;
+
+/** OpenAI response_format wrapper around the shared schema. */
 export const OPENAI_REVIEW_JSON_SCHEMA = {
   name: "code_review",
   strict: true,
-  schema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["findings", "summary", "abstained", "abstentionReason"],
-    properties: {
-      findings: {
-        type: "array",
-        maxItems: 25,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "severity",
-            "category",
-            "confidence",
-            "title",
-            "explanation",
-            "evidence",
-            "suggestion",
-          ],
-          properties: {
-            severity: { enum: ["high", "medium", "low"] },
-            category: {
-              enum: [
-                "correctness",
-                "security",
-                "performance",
-                "type-safety",
-                "error-handling",
-                "maintainability",
-              ],
-            },
-            confidence: { enum: ["low", "medium", "high"] },
-            title: { type: "string" },
-            explanation: { type: "string" },
-            evidence: {
-              type: "array",
-              minItems: 1,
-              maxItems: 5,
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["path", "startLine", "endLine", "contextId"],
-                properties: {
-                  path: { type: "string" },
-                  startLine: { type: "integer" },
-                  endLine: { type: "integer" },
-                  contextId: { type: ["string", "null"] },
-                },
-              },
-            },
-            suggestion: { type: ["string", "null"] },
-          },
-        },
-      },
-      summary: { type: "string" },
-      abstained: { type: "boolean" },
-      abstentionReason: { type: ["string", "null"] },
-    },
-  },
+  schema: REVIEW_JSON_SCHEMA,
 } as const;

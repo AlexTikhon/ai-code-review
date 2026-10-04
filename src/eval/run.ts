@@ -119,6 +119,7 @@ const deterministicModel: ReviewModel = {
 };
 
 const baseConfig: ReviewConfig = {
+  reviewProvider: "openai",
   model: "deterministic-eval",
   embeddingModel: "meaning-features",
   allowExternal: false,

@@ -19,15 +19,21 @@ These numbers validate pipeline plumbing and demonstrate the intended context ef
 
 ## Optional live evaluation
 
-Live evaluation is synthetic, capped at eight cases, and never runs in CI. It requires `AI_REVIEW_LIVE_EVAL=true`, `AI_REVIEW_ALLOW_EXTERNAL=true`, and a provider key. It runs the same pipeline in diff, lexical, and hybrid modes. Hybrid embeddings remain separately gated by `AI_REVIEW_ALLOW_EMBEDDINGS=true`; without it, the result honestly reports lexical fallback. Output includes expected labels, explicit per-label pattern matches (or `unmeasured-no-label-matcher`), actual coverage, selected evidence, status, context availability, and usage.
+`npm run eval:live` is the only place a real model is judged. It is opt-in, uses external provider APIs, **may incur cost**, and is never run by `npm test`, `npm run eval` or CI. It requires `AI_REVIEW_LIVE_EVAL=true`, `AI_REVIEW_ALLOW_EXTERNAL=true` and the selected provider's key, all exported in the shell (it does not read `.env`). It sends only the synthetic manifest [eval/live-cases.json](../eval/live-cases.json) (five cases, two of them clean), which is independent of `eval/corpus.json` so the deterministic eval never depends on a provider. By default it makes one request per case in `diff` mode. `AI_REVIEW_LIVE_MODES=diff,lexical,hybrid` adds retrieval modes (hybrid also needs `AI_REVIEW_ALLOW_EMBEDDINGS=true` and an OpenAI key, whichever review provider is selected), and `AI_REVIEW_LIVE_MAX_CASES` (1–8) trims the run.
 
 ```powershell
 $env:AI_REVIEW_LIVE_EVAL="true"
 $env:AI_REVIEW_ALLOW_EXTERNAL="true"
-$env:AI_REVIEW_ALLOW_EMBEDDINGS="true"
-$env:AI_REVIEW_LIVE_MAX_CASES="3"
-$env:OPENAI_API_KEY="..."
+$env:AI_REVIEW_PROVIDER="anthropic"        # or openai
+$env:ANTHROPIC_API_KEY="..."
+$env:AI_REVIEW_LIVE_SAVE="true"            # optional: write eval/results/<time>-<provider>-<model>.json
 npm run eval:live
 ```
 
-No live evaluation was run during this implementation. Provider schema compatibility, real token accounting, rate-limit behavior, embedding availability, and model quality therefore remain unverified integrations.
+Run it once per provider to compare them; there is no provider ranking inside the product.
+
+**Scoring is deterministic** (`src/eval/live-score.ts`); no model judges another model. An observed finding matches an expected one when one of its evidence ranges is on the expected file and overlaps the expected line range, and its category is among the listed acceptable categories (an empty list means category is not scored). Wording is never compared. Matching is one-to-one, greedy in the pipeline's deterministic finding order. Unmatched observed findings are false positives (every finding on a clean case is one); unmatched expected findings are misses.
+
+Reported per mode: true/false positives, false negatives, precision, recall and F1 (each `null` when undefined rather than 0), false positives on clean cases, the missed expected findings, the **invalid-evidence rate** (raw findings in responses the pipeline rejected for citing unsupplied evidence ÷ all raw findings; rejected findings are not delivered, so those cases score as misses), the **abstention rate** (answered cases where the model abstained), provider-failed cases (excluded from quality metrics, since an outage says nothing about the model), provider-reported input/output tokens (flagged if any were estimated), actual request count, and latency. Cost appears only if you supply `AI_REVIEW_LIVE_PRICE_INPUT_PER_MTOK` and `AI_REVIEW_LIVE_PRICE_OUTPUT_PER_MTOK` and all tokens were provider-reported; no prices are built in. Saved results contain IDs, metrics, categories, severities and `path:line` locations only: no prompts, source text, finding text or credentials. `eval/results/` is git-ignored and excluded from the package.
+
+The manifest is tiny and synthetic. Its numbers are a smoke signal for a provider/model combination, not a benchmark. **No live evaluation has been run as part of this implementation** (no credentials or authorization were available), so real-provider schema acceptance, token accounting, rate-limit behavior and model quality remain unverified.

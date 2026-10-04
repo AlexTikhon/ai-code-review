@@ -1,6 +1,22 @@
 /** The only invocation fact configuration depends on; CliArgs satisfies it. */
 export type ConfigOptions = { allowExternal: boolean };
+export const REVIEW_PROVIDERS = ["openai", "anthropic"] as const;
+export type ReviewProviderName = (typeof REVIEW_PROVIDERS)[number];
+/** Preserves the behavior from before provider selection existed. */
+export const DEFAULT_REVIEW_PROVIDER: ReviewProviderName = "openai";
+const DEFAULT_MODELS: Record<ReviewProviderName, string> = {
+  openai: "gpt-4o-mini",
+  anthropic: "claude-opus-5-5",
+};
+const MODEL_ENV: Record<ReviewProviderName, string> = {
+  openai: "AI_REVIEW_MODEL",
+  anthropic: "ANTHROPIC_MODEL",
+};
+
 export type ReviewConfig = {
+  /** Which ReviewModel the bootstrap layer composes. Embeddings are separate. */
+  reviewProvider: ReviewProviderName;
+  /** Model name for the selected review provider. */
   model: string;
   embeddingModel: string;
   allowExternal: boolean;
@@ -30,6 +46,26 @@ function positiveInt(name: string, fallback: number): number {
     throw new Error(`${name} must be a positive finite integer`);
   return value;
 }
+function reviewProvider(): ReviewProviderName {
+  const raw = process.env.AI_REVIEW_PROVIDER?.trim();
+  if (!raw) return DEFAULT_REVIEW_PROVIDER;
+  if (!(REVIEW_PROVIDERS as readonly string[]).includes(raw))
+    throw new Error(
+      `AI_REVIEW_PROVIDER must be one of ${REVIEW_PROVIDERS.join(", ")} (got "${raw.slice(0, 40)}")`,
+    );
+  return raw as ReviewProviderName;
+}
+function modelFor(provider: ReviewProviderName): string {
+  return process.env[MODEL_ENV[provider]] || DEFAULT_MODELS[provider];
+}
+/** Best-effort model name for reports; never throws, even on a bad provider. */
+export function selectedModelName(): string {
+  const raw = process.env.AI_REVIEW_PROVIDER?.trim();
+  const provider = (REVIEW_PROVIDERS as readonly string[]).includes(raw ?? "")
+    ? (raw as ReviewProviderName)
+    : DEFAULT_REVIEW_PROVIDER;
+  return modelFor(provider);
+}
 export function loadConfig(options: ConfigOptions): ReviewConfig {
   const allowed = process.env.AI_REVIEW_ALLOW_EXTERNAL === "true";
   if (options.allowExternal && !allowed)
@@ -46,8 +82,10 @@ export function loadConfig(options: ConfigOptions): ReviewConfig {
   const threshold = Number(process.env.AI_REVIEW_RELEVANCE_THRESHOLD ?? "0.05");
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1)
     throw new Error("AI_REVIEW_RELEVANCE_THRESHOLD must be between 0 and 1");
+  const provider = reviewProvider();
   return {
-    model: process.env.AI_REVIEW_MODEL ?? "gpt-4o-mini",
+    reviewProvider: provider,
+    model: modelFor(provider),
     embeddingModel:
       process.env.AI_REVIEW_EMBEDDING_MODEL ?? "text-embedding-3-small",
     allowExternal: options.allowExternal && allowed,

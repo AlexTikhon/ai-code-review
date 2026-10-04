@@ -22,6 +22,7 @@ const args: CliArgs = {
   help: false,
 };
 const config: ReviewConfig = {
+  reviewProvider: "openai",
   model: "mock",
   embeddingModel: "mock",
   allowExternal: false,

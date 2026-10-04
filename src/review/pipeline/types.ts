@@ -36,7 +36,7 @@ export type ReviewRunRequest = {
 
 /**
  * Ports and runtime collaborators supplied by the caller. The pipeline never
- * constructs a provider: composing OpenAI (or anything else) is the bootstrap
+ * constructs a provider: composing a concrete provider is the bootstrap
  * layer's job (src/cli/providers.ts).
  */
 export type ReviewRuntime = {

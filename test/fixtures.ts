@@ -24,6 +24,7 @@ export const request: ReviewRunRequest = {
 };
 
 export const testConfig: ReviewConfig = {
+  reviewProvider: "openai",
   model: "mock",
   embeddingModel: "mock",
   allowExternal: false,

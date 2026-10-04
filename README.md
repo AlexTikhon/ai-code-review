@@ -28,7 +28,7 @@ npm test
 npm run eval
 ```
 
-Help, dry-run, index construction, tests, and deterministic evaluation require no provider key.
+Help, dry-run, index construction, tests, and deterministic evaluation require no provider key and make no provider calls.
 
 ## Privacy and transmission policy
 
@@ -97,9 +97,33 @@ JSON uses schema version `1.1.0`. SARIF 2.1.0 includes the same status, coverage
 
 Valid insufficient-evidence responses are recorded as explicit per-segment abstentions and still count as completed review coverage; they are not findings.
 
+## Review providers
+
+The review model and the embedding provider are independent choices. Review can use OpenAI or Anthropic; embeddings (only needed for `--context hybrid`) are OpenAI-only today and are enabled separately. All four combinations are valid: OpenAI or Anthropic review, each with or without OpenAI embeddings.
+
+```bash
+# OpenAI review (the default; unchanged behavior)
+AI_REVIEW_PROVIDER=openai
+OPENAI_API_KEY=...
+AI_REVIEW_MODEL=gpt-4o-mini        # optional
+
+# Anthropic review
+AI_REVIEW_PROVIDER=anthropic
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=claude-opus-5-5    # optional; this is the default
+
+# Optional hybrid retrieval, with either review provider
+AI_REVIEW_ALLOW_EMBEDDINGS=true
+OPENAI_API_KEY=...
+```
+
+`AI_REVIEW_PROVIDER` defaults to `openai`; an unknown value is a configuration error reported before any review work. `AI_REVIEW_MODEL` selects the OpenAI model and `ANTHROPIC_MODEL` the Anthropic model, so an OpenAI model name is never sent to Anthropic. The same privacy gates apply to both providers: no provider is constructed or called without `AI_REVIEW_ALLOW_EXTERNAL=true` and `--allow-external`, and a dry run needs no credentials. Retries are owned by the reviewer (the Anthropic SDK's own retries are disabled), so `AI_REVIEW_MAX_REQUESTS` counts every HTTP attempt for both providers.
+
+Anthropic models that think before answering spend part of `AI_REVIEW_MAX_OUTPUT_TOKENS` on reasoning. If a response is cut off the review fails with a message saying so; raise `AI_REVIEW_MAX_OUTPUT_TOKENS` (and `AI_REVIEW_MAX_INPUT_TOKENS`, which covers the input plus the output reservation).
+
 ## Configuration
 
-The model remains configurable and defaults to `gpt-4o-mini`. Important bounds include:
+The model remains configurable per provider (see above); the OpenAI default is `gpt-4o-mini`. Important bounds include:
 
 ```env
 AI_REVIEW_MAX_INPUT_TOKENS=8000

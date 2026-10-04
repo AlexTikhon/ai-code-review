@@ -19,6 +19,9 @@ import "./prepared-retrieval.test.js";
 import "./lexical-index.test.js";
 import "./index-update.test.js";
 import "./index-refresh.test.js";
+import "./anthropic-model.test.js";
+import "./provider-composition.test.js";
+import "./live-eval.test.js";
 import { getTestCases } from "./helpers.js";
 
 let completed = false;
