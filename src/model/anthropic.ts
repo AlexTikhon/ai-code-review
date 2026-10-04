@@ -4,11 +4,16 @@ import {
   reviewResponseSchema,
 } from "../schemas/review.schema.js";
 import {
-  ModelError,
-  type ModelRequest,
-  type ModelResult,
-  type ReviewModel,
-} from "./types.js";
+  ReviewModelError,
+  abortedError,
+  httpStatusError,
+  malformedError,
+  missingKeyError,
+  normalizeThrown,
+  refusedError,
+  truncatedError,
+} from "./errors.js";
+import type { ModelRequest, ModelResult, ReviewModel } from "./types.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -47,16 +52,6 @@ export type AnthropicReviewModelOptions = {
   fetch?: typeof fetch;
 };
 
-function retryAfterMs(
-  error: InstanceType<typeof Anthropic.APIError>,
-): number | undefined {
-  const headers = error.headers as Headers | undefined;
-  const ms = Number(headers?.get?.("retry-after-ms"));
-  if (Number.isFinite(ms) && ms > 0) return ms;
-  const seconds = Number(headers?.get?.("retry-after"));
-  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
-}
-
 export class AnthropicReviewModel implements ReviewModel {
   readonly provider = "anthropic";
   private readonly apiKey: string | undefined;
@@ -89,7 +84,9 @@ export class AnthropicReviewModel implements ReviewModel {
     request: ModelRequest,
     signal: AbortSignal,
   ): Promise<ModelResult> {
-    if (!this.apiKey) throw new ModelError("Missing ANTHROPIC_API_KEY", false);
+    if (!this.apiKey) throw missingKeyError(this.provider, "ANTHROPIC_API_KEY");
+    // An already-cancelled call must never reach the wire.
+    if (signal.aborted) throw abortedError(this.provider, signal);
     let message: Anthropic.Message;
     try {
       // No sampling parameters and no forced tool_choice: current models
@@ -107,38 +104,41 @@ export class AnthropicReviewModel implements ReviewModel {
         { signal },
       );
     } catch (error) {
-      throw this.classify(error);
+      throw this.classify(error, signal);
     }
     return this.normalize(message);
   }
 
   private normalize(message: Anthropic.Message): ModelResult {
     if (message.stop_reason === "refusal")
-      throw new ModelError("Anthropic declined to review this content", false);
+      throw refusedError(this.provider, "Anthropic");
+    // Reasoning counts toward the output limit, so this can occur even for a
+    // short answer; a cut-off object is never partially accepted.
     if (message.stop_reason === "max_tokens")
-      throw new ModelError(
-        "Anthropic output was cut off at the output token limit (reasoning counts toward it); raise AI_REVIEW_MAX_OUTPUT_TOKENS",
-        false,
-      );
+      throw truncatedError(this.provider, "Anthropic");
     const content = message.content
       .flatMap((block) => (block.type === "text" ? [block.text] : []))
       .join("");
     if (!content)
-      throw new ModelError(
+      throw malformedError(
+        this.provider,
         "Anthropic response did not include structured content",
-        true,
       );
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
     } catch {
-      throw new ModelError("Anthropic returned malformed JSON", true);
+      throw malformedError(this.provider, "Anthropic returned malformed JSON");
     }
     const validated = reviewResponseSchema.safeParse(parsed);
     if (!validated.success)
-      throw new ModelError(
-        `Anthropic output failed schema validation: ${validated.error.message}`,
-        true,
+      throw malformedError(
+        this.provider,
+        // Paths only: zod messages can echo returned values.
+        `Anthropic output failed schema validation (${validated.error.issues
+          .slice(0, 3)
+          .map((issue) => issue.path.join(".") || "(root)")
+          .join(", ")})`,
       );
     const usage = message.usage;
     const reported =
@@ -161,36 +161,48 @@ export class AnthropicReviewModel implements ReviewModel {
     };
   }
 
-  private classify(error: unknown): ModelError {
-    if (error instanceof ModelError) return error;
+  /** The only place Anthropic SDK error classes are inspected. */
+  private classify(error: unknown, signal: AbortSignal): ReviewModelError {
+    if (error instanceof ReviewModelError) return error;
+    if (signal.aborted) return abortedError(this.provider, signal);
     if (error instanceof Anthropic.APIUserAbortError)
-      return new ModelError("Anthropic request aborted", false);
+      return new ReviewModelError({
+        kind: "aborted",
+        provider: this.provider,
+        message: "Anthropic request aborted",
+      });
+    if (error instanceof Anthropic.APIConnectionTimeoutError)
+      return new ReviewModelError({
+        kind: "timeout",
+        provider: this.provider,
+        message: "Anthropic request timed out",
+      });
     if (error instanceof Anthropic.APIConnectionError)
-      return new ModelError(this.safe(`Anthropic connection error`), true);
-    if (error instanceof Anthropic.APIError) {
-      const status = error.status;
-      const retryable =
-        status === 408 ||
-        status === 409 ||
-        status === 429 ||
-        (status !== undefined && status >= 500);
-      return new ModelError(
-        this.safe(`Anthropic error ${status}: ${error.message}`),
-        retryable,
-        retryable ? retryAfterMs(error) : undefined,
-      );
+      return new ReviewModelError({
+        kind: "network",
+        provider: this.provider,
+        message: "Anthropic connection error",
+      });
+    if (error instanceof Anthropic.APIError && error.status !== undefined) {
+      const body = (
+        error.error as
+          { error?: { type?: unknown; message?: unknown } } | undefined
+      )?.error;
+      return httpStatusError({
+        provider: this.provider,
+        label: "Anthropic",
+        status: error.status,
+        detail: typeof body?.message === "string" ? body.message : undefined,
+        code: typeof body?.type === "string" ? body.type : undefined,
+        headers: error.headers as Headers | undefined,
+        secrets: [this.apiKey],
+      });
     }
-    return new ModelError(
-      this.safe(
-        `Anthropic request failed: ${error instanceof Error ? error.message : String(error)}`,
-      ),
-      false,
-    );
-  }
-
-  /** Error text may echo server output; never let the key or a long body out. */
-  private safe(text: string): string {
-    const redacted = this.apiKey ? text.split(this.apiKey).join("[key]") : text;
-    return redacted.slice(0, 500);
+    return normalizeThrown(error, {
+      provider: this.provider,
+      label: "Anthropic",
+      signal,
+      secrets: [this.apiKey],
+    });
   }
 }

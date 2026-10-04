@@ -67,6 +67,39 @@ export function matchFindings(
   };
 }
 
+export type ReviewErrorFlags = {
+  /** Provider, budget, cancellation or local failure: says nothing about the model. */
+  providerFailed: boolean;
+  /** The model answered validly but cited evidence it was not given. */
+  invalidEvidence: boolean;
+  /** The response was not parseable structured output. */
+  invalidOutput: boolean;
+  /** The response hit the output-token cap. */
+  truncated: boolean;
+};
+
+/**
+ * Sort a review result's errors by their stable `code`. Message text is never
+ * consulted. An error without a recognized model-output code is treated as an
+ * infrastructure failure, the conservative choice for quality metrics.
+ */
+export function classifyReviewErrors(
+  errors: ReadonlyArray<{ code?: string }>,
+): ReviewErrorFlags {
+  const flags: ReviewErrorFlags = {
+    providerFailed: false,
+    invalidEvidence: false,
+    invalidOutput: false,
+    truncated: false,
+  };
+  for (const { code } of errors)
+    if (code === "MODEL_INVALID_EVIDENCE") flags.invalidEvidence = true;
+    else if (code === "MODEL_MALFORMED_RESPONSE") flags.invalidOutput = true;
+    else if (code === "MODEL_RESPONSE_TRUNCATED") flags.truncated = true;
+    else flags.providerFailed = true;
+  return flags;
+}
+
 export type LiveCaseInput = {
   id: string;
   mode: string;
@@ -80,6 +113,10 @@ export type LiveCaseInput = {
   invalidEvidence: boolean;
   /** Provider/budget/configuration failure: says nothing about model quality. */
   providerFailed: boolean;
+  /** Unparseable structured output; nothing was delivered. */
+  invalidOutput?: boolean;
+  /** Cut off at the output-token cap; a configuration limit, not model judgment. */
+  truncated?: boolean;
   abstained: boolean;
   inputTokens: number;
   outputTokens: number;
@@ -92,7 +129,12 @@ export type LiveCaseResult = {
   id: string;
   mode: string;
   clean: boolean;
-  outcome: "scored" | "invalid-evidence" | "provider-failed";
+  outcome:
+    | "scored"
+    | "invalid-evidence"
+    | "invalid-output"
+    | "truncated"
+    | "provider-failed";
   expectedCount: number;
   truePositives: number;
   falsePositives: number;
@@ -122,10 +164,10 @@ export function scoreCase(input: LiveCaseInput): LiveCaseResult {
     requests: input.requests,
     latencyMs: input.latencyMs,
   };
-  if (input.providerFailed)
+  if (input.providerFailed || input.truncated)
     return {
       ...base,
-      outcome: "provider-failed",
+      outcome: input.providerFailed ? "provider-failed" : "truncated",
       truePositives: 0,
       falsePositives: 0,
       missed: [],
@@ -133,14 +175,19 @@ export function scoreCase(input: LiveCaseInput): LiveCaseResult {
     };
   // Rejected findings are not delivered, so they are misses, not false
   // positives: the user would see nothing for this case.
-  const delivered = input.invalidEvidence ? [] : input.observed;
+  const unusable = input.invalidEvidence || input.invalidOutput;
+  const delivered = unusable ? [] : input.observed;
   const { matched, falsePositives, missed } = matchFindings(
     input.expected,
     delivered,
   );
   return {
     ...base,
-    outcome: input.invalidEvidence ? "invalid-evidence" : "scored",
+    outcome: input.invalidEvidence
+      ? "invalid-evidence"
+      : input.invalidOutput
+        ? "invalid-output"
+        : "scored",
     truePositives: matched,
     falsePositives,
     missed,
@@ -161,6 +208,18 @@ export type LiveMetrics = {
   cases: number;
   scoredCases: number;
   providerFailedCases: number;
+  /** Every case sorted into exactly one reporting bucket (plus the two scored sub-buckets). */
+  outcomes: {
+    scored: number;
+    invalidEvidence: number;
+    invalidOutput: number;
+    truncated: number;
+    providerFailed: number;
+    /** Scored cases where the model abstained. */
+    abstained: number;
+    /** Scored cases that delivered no finding and did not abstain. */
+    cleanSuccess: number;
+  };
   truePositives: number;
   falsePositives: number;
   falseNegatives: number;
@@ -184,23 +243,41 @@ export function aggregate(
   inputs: LiveCaseInput[],
   results: LiveCaseResult[],
 ): LiveMetrics {
-  const answered = results.filter((r) => r.outcome !== "provider-failed");
+  // Provider failures and truncation say nothing about the model's judgment.
+  const answered = results.filter(
+    (r) => r.outcome !== "provider-failed" && r.outcome !== "truncated",
+  );
+  const count = (outcome: LiveCaseResult["outcome"]) =>
+    results.filter((r) => r.outcome === outcome).length;
   const tp = results.reduce((sum, r) => sum + r.truePositives, 0);
   const fp = results.reduce((sum, r) => sum + r.falsePositives, 0);
   const fn = results.reduce((sum, r) => sum + r.missed.length, 0);
   const precision = ratio(tp, tp + fp);
   const recall = ratio(tp, tp + fn);
   const rawTotal = inputs
-    .filter((i) => !i.providerFailed)
+    .filter((i) => !i.providerFailed && !i.truncated)
     .reduce((sum, i) => sum + i.rawFindingCount, 0);
   const rawInvalid = inputs
-    .filter((i) => !i.providerFailed && i.invalidEvidence)
+    .filter((i) => !i.providerFailed && !i.truncated && i.invalidEvidence)
     .reduce((sum, i) => sum + i.rawFindingCount, 0);
   const latency = results.reduce((sum, r) => sum + r.latencyMs, 0);
   return {
     cases: results.length,
     scoredCases: answered.length,
-    providerFailedCases: results.length - answered.length,
+    providerFailedCases: count("provider-failed"),
+    outcomes: {
+      scored: count("scored"),
+      invalidEvidence: count("invalid-evidence"),
+      invalidOutput: count("invalid-output"),
+      truncated: count("truncated"),
+      providerFailed: count("provider-failed"),
+      abstained: results.filter((r) => r.outcome === "scored" && r.abstained)
+        .length,
+      cleanSuccess: results.filter(
+        (r) =>
+          r.outcome === "scored" && !r.abstained && r.observed.length === 0,
+      ).length,
+    },
     truePositives: tp,
     falsePositives: fp,
     falseNegatives: fn,

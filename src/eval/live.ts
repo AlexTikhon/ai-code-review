@@ -19,6 +19,7 @@ import type { ModelRequest, ModelResult, ReviewModel } from "../model/types.js";
 import type { ContextMode, ReviewSource } from "../review/types.js";
 import {
   aggregate,
+  classifyReviewErrors,
   estimateCost,
   scoreCase,
   type ExpectedFinding,
@@ -45,7 +46,6 @@ const KEY_ENV: Record<ReviewProviderName, string> = {
   anthropic: "ANTHROPIC_API_KEY",
 };
 const MODES: readonly ContextMode[] = ["diff", "lexical", "hybrid"];
-const INVALID_EVIDENCE = /invalid evidence references/;
 
 async function evalDir(): Promise<string> {
   for (const relative of ["../../eval", "../../../eval"]) {
@@ -186,9 +186,7 @@ async function main() {
           embedding: providers.embedding,
         });
         const latencyMs = performance.now() - started;
-        const invalidEvidence = result.errors.some((error) =>
-          INVALID_EVIDENCE.test(error.message),
-        );
+        const flags = classifyReviewErrors(result.errors);
         inputs.push({
           id: example.id,
           mode,
@@ -196,10 +194,7 @@ async function main() {
           expected: example.expectedFindings,
           observed: result.findings,
           rawFindingCount: recorder.rawFindings,
-          invalidEvidence,
-          providerFailed: result.errors.some(
-            (error) => !INVALID_EVIDENCE.test(error.message),
-          ),
+          ...flags,
           abstained: result.abstentions.length > 0,
           inputTokens: result.usage.inputTokens,
           outputTokens: result.usage.outputTokens,
@@ -234,7 +229,7 @@ async function main() {
     model: config.model,
     manifestVersion: manifest.version,
     caveat:
-      "Tiny synthetic manifest scored by deterministic structural matching (file + line overlap + category). Not a benchmark of general model quality. Provider-failed cases are excluded from quality metrics.",
+      "Tiny synthetic manifest scored by deterministic structural matching (file + line overlap + category). Not a benchmark of general model quality. Provider-failed and truncated cases are reported but excluded from quality metrics; invalid-output and invalid-evidence cases count as delivering nothing.",
     modes: perMode,
   };
   const text = JSON.stringify(report, null, 2);

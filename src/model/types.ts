@@ -13,7 +13,9 @@ export type ModelUsage = {
 export type ModelResult = { response: ReviewResponse; usage: ModelUsage };
 /**
  * Provider-neutral port. Implementations are chosen by the bootstrap layer
- * (src/cli/providers.ts); the pipeline only ever sees this interface.
+ * (src/cli/providers.ts); the pipeline only ever sees this interface. Every
+ * failure an implementation throws must be a ReviewModelError (see errors.ts):
+ * SDK and HTTP details stop at the adapter.
  */
 export interface ReviewModel {
   readonly provider: string;
@@ -28,12 +30,3 @@ export interface ReviewModel {
 }
 /** The subset of a model that scopes cached results. */
 export type ModelIdentity = Pick<ReviewModel, "provider" | "identity">;
-export class ModelError extends Error {
-  constructor(
-    message: string,
-    public readonly retryable: boolean,
-    public readonly retryAfterMs?: number,
-  ) {
-    super(message);
-  }
-}

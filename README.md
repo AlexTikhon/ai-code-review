@@ -6,7 +6,7 @@ This is an engineering baseline, not a claim that model findings are correct or 
 
 ## Pipeline and modes
 
-The source-neutral pipeline is `ingest → filter/policy → repository context → analyze → finalize`; each stage is a separate module described in [architecture decisions](docs/ARCHITECTURE.md). The repository index is updated incrementally: unchanged files reuse their chunks and embeddings, and only changed files are re-read and re-chunked. A corrupt or incompatible index cache is validated, rebuilt from source, and reported in `context.message` rather than trusted. `npm run bench` prints a local lexical-retrieval and incremental-index benchmark.
+The source-neutral pipeline is `ingest → filter/policy → repository context → analyze → finalize`; each stage is a separate module described in [architecture decisions](docs/ARCHITECTURE.md). The repository index is updated incrementally: unchanged files reuse their chunks and embeddings, and only changed files are re-read and re-chunked. A corrupt or incompatible index cache is validated, rebuilt from source, and reported in `context.message` rather than trusted. Paid embedding work survives a failed or cancelled run in a separate checkpoint (the canonical index is still only ever replaced whole), so a retry requests just the missing vectors. `npm run bench` prints a local lexical-retrieval and incremental-index benchmark.
 
 - Local mode collects tracked and untracked changes relative to `HEAD` or the merge-base of `--base`. Git output is NUL-delimited and external diff/textconv helpers are disabled.
 - PR mode fetches immutable base/head SHAs and verifies the number of files returned against GitHub's `changed_files`. The `.ai-reviewer-ignore` policy is read from the trusted base SHA.
@@ -93,7 +93,7 @@ Coverage fields have documented definitions in the JSON schema/type: `discovered
 
 Exit codes are `0` for a complete result below the configured finding threshold, `1` for a complete result meeting/exceeding the threshold, `2` for failed/partial operational or incomplete review, and `64` for CLI usage errors. Dry-run/index return `0` unless their operation fails.
 
-JSON uses schema version `1.1.0`. SARIF 2.1.0 includes the same status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
+JSON uses schema version `1.2.0` (adds optional `code`, `provider` and `retryable` to each error). SARIF 2.1.0 includes the same status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
 
 Valid insufficient-evidence responses are recorded as explicit per-segment abstentions and still count as completed review coverage; they are not findings.
 
@@ -119,7 +119,7 @@ OPENAI_API_KEY=...
 
 `AI_REVIEW_PROVIDER` defaults to `openai`; an unknown value is a configuration error reported before any review work. `AI_REVIEW_MODEL` selects the OpenAI model and `ANTHROPIC_MODEL` the Anthropic model, so an OpenAI model name is never sent to Anthropic. The same privacy gates apply to both providers: no provider is constructed or called without `AI_REVIEW_ALLOW_EXTERNAL=true` and `--allow-external`, and a dry run needs no credentials. Retries are owned by the reviewer (the Anthropic SDK's own retries are disabled), so `AI_REVIEW_MAX_REQUESTS` counts every HTTP attempt for both providers.
 
-Anthropic models that think before answering spend part of `AI_REVIEW_MAX_OUTPUT_TOKENS` on reasoning. If a response is cut off the review fails with a message saying so; raise `AI_REVIEW_MAX_OUTPUT_TOKENS` (and `AI_REVIEW_MAX_INPUT_TOKENS`, which covers the input plus the output reservation).
+Anthropic models that think before answering spend part of `AI_REVIEW_MAX_OUTPUT_TOKENS` on reasoning. If a response is cut off the file is reported with error code `MODEL_RESPONSE_TRUNCATED` (and never treated as clean); raise `AI_REVIEW_MAX_OUTPUT_TOKENS` (and `AI_REVIEW_MAX_INPUT_TOKENS`, which covers the input plus the output reservation).
 
 ## Configuration
 

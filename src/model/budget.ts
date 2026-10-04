@@ -1,5 +1,17 @@
 export type ExternalRequestKind = "model" | "embedding";
 
+/** The request cap was reached; no further provider call may start. */
+export class RequestBudgetError extends Error {
+  readonly code = "REQUEST_BUDGET_EXHAUSTED";
+  constructor(
+    readonly limit: number,
+    readonly kind: ExternalRequestKind,
+  ) {
+    super(`External request budget ${limit} exhausted before ${kind} call`);
+    this.name = "RequestBudgetError";
+  }
+}
+
 /**
  * The single place where external provider calls are counted and capped.
  * Synchronous reservation makes the limit atomic across concurrent promises:
@@ -20,10 +32,7 @@ export class ExternalRequestBudget {
 
   reserve(kind: ExternalRequestKind): void {
     this.signal.throwIfAborted();
-    if (this.used >= this.limit)
-      throw new Error(
-        `External request budget ${this.limit} exhausted before ${kind} call`,
-      );
+    if (this.used >= this.limit) throw new RequestBudgetError(this.limit, kind);
     this.used++;
     this.byKind[kind]++;
     this.onReserve?.(kind);

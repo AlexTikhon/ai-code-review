@@ -8,7 +8,8 @@ import { requestFromCliArgs } from "../src/cli/request.js";
 import { reviewCacheKey, writeReviewCache } from "../src/cache/review-cache.js";
 import { ExternalRequestBudget } from "../src/model/budget.js";
 import { OpenAIReviewModel } from "../src/model/openai.js";
-import { ModelError, type ReviewModel } from "../src/model/types.js";
+import type { ReviewModel } from "../src/model/types.js";
+import { modelError } from "./model-fixtures.js";
 import type { ReviewEvent } from "../src/observability/events.js";
 import { runReviewPipeline } from "../src/review/pipeline.js";
 import {
@@ -315,7 +316,7 @@ unitTest(
             "abort",
             () => {
               clearInterval(keepAlive);
-              reject(new ModelError("aborted", false));
+              reject(modelError("aborted", false));
             },
             { once: true },
           );
@@ -383,7 +384,7 @@ unitTest("every retry attempt consumes one request", async () => {
     provider: "test",
     async review() {
       calls++;
-      throw new ModelError("temporary", true, 1);
+      throw modelError("temporary", true, 1);
     },
   };
   const result = await executeReviewPipeline(
@@ -553,7 +554,7 @@ unitTest(
       provider: "test",
       async review(req) {
         calls++;
-        if (calls === 2) throw new ModelError("second segment failed", false);
+        if (calls === 2) throw modelError("second segment failed", false);
         return findingResult(filenameOf(req.user), 100);
       },
     };

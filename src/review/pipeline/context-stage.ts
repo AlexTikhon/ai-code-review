@@ -66,6 +66,17 @@ export async function contextStage(
       signal: ctx.signal,
       beforeEmbeddingRequest: () => ctx.budget.reserve("embedding"),
       onDiagnostic: (message) => diagnostics.push(message),
+      // Counts and reasons only: never vectors, prompts or source text.
+      onCheckpoint: ({ type, ...data }) =>
+        emitEvent(
+          ctx.events,
+          ctx.runId,
+          "embedding",
+          type === "save_failed" || type === "discarded"
+            ? "warning"
+            : "complete",
+          { message: `checkpoint_${type}`, data },
+        ),
     });
     const prepared = prepareRepositoryIndex(index);
     const messages = [
@@ -96,6 +107,9 @@ export async function contextStage(
         vectorsReused: stats.vectorsReused,
         vectorsCreated: stats.vectorsCreated,
         embeddingRequests: stats.embeddingRequests,
+        vectorsFromCheckpoint: stats.vectorsFromCheckpoint,
+        embeddingRequestsAvoided: stats.embeddingRequestsAvoided,
+        checkpointSaves: stats.checkpointSaves,
       },
     });
     return {

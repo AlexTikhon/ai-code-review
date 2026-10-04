@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { AnthropicReviewModel } from "../src/model/anthropic.js";
 import { executeModel } from "../src/model/execution.js";
 import { OpenAIReviewModel } from "../src/model/openai.js";
-import { ModelError } from "../src/model/types.js";
+import { ReviewModelError } from "../src/model/errors.js";
 import { unitTest } from "./helpers.js";
 
 const KEY = "sk-ant-test-secret-key";
@@ -95,12 +95,15 @@ const model = (
   apiKey: string | undefined = KEY,
 ) => new AnthropicReviewModel({ apiKey, fetch: api.fetchImpl });
 const live = () => new AbortController().signal;
-async function failure(promise: Promise<unknown>): Promise<ModelError> {
+async function failure(promise: Promise<unknown>): Promise<ReviewModelError> {
   const error = await promise.then(
     () => undefined,
     (e: unknown) => e,
   );
-  assert.ok(error instanceof ModelError, `expected ModelError, got ${error}`);
+  assert.ok(
+    error instanceof ReviewModelError,
+    `expected ReviewModelError, got ${error}`,
+  );
   return error;
 }
 
@@ -347,7 +350,7 @@ unitTest(
       apiKey: KEY,
       fetch: fetchImpl,
     });
-    const error = await executeModel({
+    const outcome = await executeModel({
       model: anthropic,
       request,
       runId: "r",
@@ -356,12 +359,12 @@ unitTest(
       requestTimeoutMs: 5000,
       totalSignal: controller.signal,
       events: () => undefined,
-    }).then(
-      () => undefined,
-      (e: unknown) => e,
-    );
-    assert.ok(error instanceof ModelError);
-    assert.equal(error.retryable, false);
+    });
+    assert.equal(outcome.ok, false);
+    if (outcome.ok) return;
+    assert.ok(outcome.error instanceof ReviewModelError);
+    assert.equal(outcome.error.kind, "aborted");
+    assert.equal(outcome.error.retryable, false);
     assert.equal(calls, 1, "no retry after cancellation");
   },
 );

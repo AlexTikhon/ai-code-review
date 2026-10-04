@@ -50,6 +50,7 @@ function sarif(result: ReviewResult) {
             toolExecutionNotifications: result.errors.map((error) => ({
               level: error.fatal ? "error" : "warning",
               message: { text: `${error.stage}: ${error.message}` },
+              ...(error.code ? { descriptor: { id: error.code } } : {}),
             })),
           },
         ],
@@ -108,7 +109,7 @@ export function printReviewResult(
     console.error(`\n${sectionTitle("ERRORS")}`);
     for (const error of result.errors)
       console.error(
-        `${errorLabel("*")} ${error.stage}${error.filename ? `/${error.filename}` : ""}: ${error.message}`,
+        `${errorLabel("*")} ${error.stage}${error.filename ? `/${error.filename}` : ""}${error.code ? ` [${error.code}]` : ""}: ${error.message}`,
       );
   }
   console.log(`\n${sectionTitle("FINDINGS")}`);

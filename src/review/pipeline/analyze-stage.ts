@@ -1,9 +1,9 @@
 import { emitEvent } from "../../observability/events.js";
-import type { ReviewSource, ReviewableFile } from "../types.js";
+import type { ReviewError, ReviewSource, ReviewableFile } from "../types.js";
 import { emptyUsageDelta } from "./aggregate.js";
 import { runBounded } from "./concurrency.js";
 import type { ContextOutcome } from "./context-stage.js";
-import { errorMessage } from "./result.js";
+import { unexpectedFailure } from "./analysis-errors.js";
 import { reviewFile } from "./review-file.js";
 import type { FileReviewOutcome, PipelineContext } from "./types.js";
 
@@ -11,7 +11,7 @@ function unfinishedOutcome(
   order: number,
   file: ReviewableFile,
   started: boolean,
-  message: string,
+  error: ReviewError,
 ): FileReviewOutcome {
   return {
     order,
@@ -22,14 +22,7 @@ function unfinishedOutcome(
     totalSegments: file.segments.length,
     findings: [],
     abstentions: [],
-    errors: [
-      {
-        stage: "analyze",
-        filename: file.filename,
-        message,
-        fatal: false,
-      },
-    ],
+    errors: [error],
     selectedContext: [],
     usage: emptyUsageDelta(),
   };
@@ -72,13 +65,22 @@ export async function analyzeStage(
     const file = input.files[order]!;
     if (result.status === "fulfilled") return result.value;
     if (result.status === "rejected")
-      return unfinishedOutcome(order, file, true, errorMessage(result.reason));
-    return unfinishedOutcome(
-      order,
-      file,
-      false,
-      "Review cancelled before this file started (total review deadline exceeded)",
-    );
+      return unfinishedOutcome(
+        order,
+        file,
+        true,
+        unexpectedFailure(file.filename, result.reason, ctx.signal.aborted)
+          .error,
+      );
+    return unfinishedOutcome(order, file, false, {
+      stage: "analyze",
+      filename: file.filename,
+      message:
+        "Review cancelled before this file started (total review deadline exceeded)",
+      fatal: false,
+      code: "REVIEW_ABORTED",
+      retryable: true,
+    });
   });
   emitEvent(ctx.events, ctx.runId, "analyze", "complete", {
     durationMs: ctx.now() - started,

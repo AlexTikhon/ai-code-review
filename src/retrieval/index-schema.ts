@@ -29,7 +29,7 @@ const chunkSchema = z
   })
   .refine((chunk) => chunk.endLine >= chunk.startLine, "endLine < startLine");
 
-const vectorSchema = z
+export const vectorSchema = z
   .object({
     cacheKey: nonEmpty,
     values: finiteNumberArray,

@@ -1,4 +1,6 @@
-export const RESULT_SCHEMA_VERSION = "1.1.0";
+import type { ModelErrorCode } from "../model/errors.js";
+
+export const RESULT_SCHEMA_VERSION = "1.2.0";
 export const PROMPT_VERSION = "3.0.0";
 export const POLICY_VERSION = "1.1.0";
 
@@ -128,6 +130,19 @@ export type Usage = {
   cacheHits: number;
   latencyMs: number;
 };
+/**
+ * Stable, machine-readable reason for a failure during analysis. Consumers
+ * should branch on this, never on `message`.
+ */
+export type ReviewErrorCode =
+  | ModelErrorCode
+  /** The model answered, but a finding cited evidence that was not supplied. */
+  | "MODEL_INVALID_EVIDENCE"
+  | "REQUEST_BUDGET_EXHAUSTED"
+  /** Cancelled by the total deadline or the caller. */
+  | "REVIEW_ABORTED"
+  /** Any other analysis failure, e.g. a prompt that cannot fit its budget. */
+  | "ANALYSIS_FAILED";
 export type ReviewError = {
   stage:
     | "config"
@@ -140,6 +155,11 @@ export type ReviewError = {
   message: string;
   filename?: string;
   fatal: boolean;
+  code?: ReviewErrorCode;
+  /** Model provider involved, for model failures. */
+  provider?: string;
+  /** Whether re-running the review could plausibly succeed. */
+  retryable?: boolean;
 };
 export type ContextUse = {
   id: string;

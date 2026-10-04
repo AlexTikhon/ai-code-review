@@ -3,6 +3,7 @@ import {
   reviewCacheKey,
   writeReviewCache,
 } from "../../cache/review-cache.js";
+import { ReviewModelError } from "../../model/errors.js";
 import { executeModel } from "../../model/execution.js";
 import type { ModelResult } from "../../model/types.js";
 import { emitEvent } from "../../observability/events.js";
@@ -21,7 +22,13 @@ import type {
   ReviewerFinding,
 } from "../types.js";
 import { addUsage, emptyUsageDelta } from "./aggregate.js";
-import { errorMessage } from "./result.js";
+import {
+  invalidEvidenceFailure,
+  modelFailure,
+  unexpectedFailure,
+  type SegmentFailure,
+  type SegmentStatus,
+} from "./analysis-errors.js";
 import type {
   Abstention,
   FileReviewOutcome,
@@ -38,14 +45,17 @@ export type FileJob = {
 };
 
 type SegmentOutcome = {
-  /** Present only on success. */
-  findings?: ReviewerFinding[];
-  abstention?: Abstention;
-  error?: ReviewError;
   /** Context is reported even when the segment later fails. */
   selectedContext: ContextUse[];
   usage: UsageDelta;
-};
+} & (
+  | {
+      status: "success";
+      findings: ReviewerFinding[];
+      abstention?: Abstention;
+    }
+  | SegmentFailure
+);
 
 function contextUses(candidates: RetrievalCandidate[]): ContextUse[] {
   return candidates.map(({ chunk, score, reasons }) => ({
@@ -164,24 +174,19 @@ async function reviewSegment(
         events: ctx.events,
         beforeAttempt: () => ctx.budget.reserve("model"),
       });
-      modelResult = executed.result;
       usage = addUsage(usage, {
         ...emptyUsageDelta(),
         attempts: executed.attempts,
       });
-      validated = validateFindings(
-        modelResult.response,
-        file.filename,
-        segment,
-        assembled.context,
-      );
-      // A malformed or invented citation must never become a clean result.
-      if (validated.length !== modelResult.response.findings.length)
-        throw new Error(
-          "Model returned one or more invalid evidence references",
-        );
-      if (root)
-        await writeReviewCache(root, config.cacheDirName, key, modelResult);
+      if (!executed.ok) {
+        const failure =
+          executed.error instanceof ReviewModelError
+            ? modelFailure(file.filename, executed.error)
+            : unexpectedFailure(file.filename, executed.error, false);
+        return { ...failure, selectedContext, usage };
+      }
+      modelResult = executed.result;
+      // Tokens were spent whether or not the evidence turns out to be usable.
       usage = addUsage(usage, {
         ...emptyUsageDelta(),
         inputTokens: modelResult.usage.actual
@@ -192,8 +197,29 @@ async function reviewSegment(
           : 0,
         estimated: !modelResult.usage.actual,
       });
+      validated = validateFindings(
+        modelResult.response,
+        file.filename,
+        segment,
+        assembled.context,
+      );
+      // A malformed or invented citation must never become a clean result,
+      // and is reported as bad evidence, not as a provider failure.
+      if (validated.length !== modelResult.response.findings.length)
+        return {
+          ...invalidEvidenceFailure(
+            file.filename,
+            modelResult.response.findings.length - validated.length,
+            model.provider,
+          ),
+          selectedContext,
+          usage,
+        };
+      if (root)
+        await writeReviewCache(root, config.cacheDirName, key, modelResult);
     }
     return {
+      status: "success",
       findings: validated!,
       abstention: modelResult.response.abstained
         ? {
@@ -207,18 +233,10 @@ async function reviewSegment(
       usage,
     };
   } catch (error) {
-    // executeModel tags errors with the attempts it actually made.
-    usage = addUsage(usage, {
-      ...emptyUsageDelta(),
-      attempts: Number((error as { attempts?: number })?.attempts ?? 0),
-    });
+    // Anything not already classified above: budget, prompt assembly,
+    // retrieval, cache I/O, or cancellation.
     return {
-      error: {
-        stage: "analyze",
-        filename: file.filename,
-        message: errorMessage(error),
-        fatal: false,
-      },
+      ...unexpectedFailure(file.filename, error, ctx.signal.aborted),
       selectedContext,
       usage,
     };
@@ -243,16 +261,18 @@ export async function reviewFile(
   let usage = emptyUsageDelta();
   let completedSegments = 0;
   let failed = false;
+  let failureStatus: SegmentStatus = "success";
   for (const segment of file.segments) {
     const outcome = await reviewSegment(ctx, job, segment);
     usage = addUsage(usage, outcome.usage);
     selectedContext.push(...outcome.selectedContext);
-    if (outcome.error) {
+    if (outcome.status !== "success") {
       errors.push(outcome.error);
+      failureStatus = outcome.status;
       failed = true;
       break;
     }
-    findings.push(...outcome.findings!);
+    findings.push(...outcome.findings);
     if (outcome.abstention) abstentions.push(outcome.abstention);
     completedSegments++;
   }
@@ -267,6 +287,8 @@ export async function reviewFile(
       attempts: usage.attempts,
       contexts: selectedContext.length,
       failed,
+      outcome: failureStatus,
+      ...(errors[0]?.code ? { code: errors[0].code } : {}),
     },
   });
   return {

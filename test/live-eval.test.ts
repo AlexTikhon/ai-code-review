@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   aggregate,
+  classifyReviewErrors,
   estimateCost,
   findingMatches,
   matchFindings,
@@ -342,5 +343,81 @@ unitTest(
     const badProvider = await run({ ...optedIn, AI_REVIEW_PROVIDER: "foo" });
     assert.equal(badProvider.code, 1);
     assert.match(badProvider.stderr, /AI_REVIEW_PROVIDER must be one of/);
+  },
+);
+
+unitTest(
+  "review errors are classified by stable code, never by message text",
+  () => {
+    const flags = (...codes: Array<string | undefined>) =>
+      classifyReviewErrors(
+        codes.map((code) => ({ code, message: "misleading invalid evidence" })),
+      );
+    assert.deepEqual(flags(), {
+      providerFailed: false,
+      invalidEvidence: false,
+      invalidOutput: false,
+      truncated: false,
+    });
+    assert.equal(flags("MODEL_INVALID_EVIDENCE").invalidEvidence, true);
+    assert.equal(flags("MODEL_MALFORMED_RESPONSE").invalidOutput, true);
+    assert.equal(flags("MODEL_RESPONSE_TRUNCATED").truncated, true);
+    for (const code of [
+      "MODEL_RATE_LIMIT",
+      "MODEL_AUTHENTICATION",
+      "MODEL_TIMEOUT",
+      "MODEL_REFUSED",
+      "REQUEST_BUDGET_EXHAUSTED",
+      "REVIEW_ABORTED",
+      "ANALYSIS_FAILED",
+      undefined,
+    ])
+      assert.equal(flags(code).providerFailed, true, String(code));
+    // A message that merely says "invalid evidence" proves nothing.
+    assert.equal(flags(undefined).invalidEvidence, false);
+  },
+);
+
+unitTest(
+  "truncation and provider failure are reported, not scored as model misses",
+  () => {
+    const truncated = scoreCase(input({ truncated: true }));
+    assert.equal(truncated.outcome, "truncated");
+    assert.equal(truncated.missed.length, 0);
+    const malformed = scoreCase(input({ invalidOutput: true }));
+    assert.equal(malformed.outcome, "invalid-output");
+    assert.equal(
+      malformed.missed.length,
+      1,
+      "nothing was delivered to the user",
+    );
+    const provider = scoreCase(input({ providerFailed: true }));
+    assert.equal(provider.outcome, "provider-failed");
+    assert.equal(provider.missed.length, 0);
+
+    const inputs = [
+      input({ id: "ok", observed: [observed(5)] }),
+      input({ id: "t", truncated: true }),
+      input({ id: "p", providerFailed: true }),
+      input({ id: "m", invalidOutput: true }),
+      input({ id: "e", invalidEvidence: true, rawFindingCount: 1 }),
+      input({ id: "clean", clean: true, expected: [] }),
+      input({ id: "abstain", clean: true, expected: [], abstained: true }),
+    ];
+    const metrics = aggregate(inputs, inputs.map(scoreCase));
+    assert.deepEqual(metrics.outcomes, {
+      scored: 3,
+      invalidEvidence: 1,
+      invalidOutput: 1,
+      truncated: 1,
+      providerFailed: 1,
+      abstained: 1,
+      cleanSuccess: 1,
+    });
+    assert.equal(metrics.providerFailedCases, 1);
+    // Only the provider failure and the truncation are excluded from quality:
+    // the malformed and invalid-evidence cases each count one missed finding.
+    assert.equal(metrics.falseNegatives, 2);
+    assert.equal(metrics.truePositives, 1);
   },
 );

@@ -3,17 +3,30 @@ import {
   OPENAI_REVIEW_JSON_SCHEMA,
 } from "../schemas/review.schema.js";
 import {
-  ModelError,
-  type ModelRequest,
-  type ModelResult,
-  type ReviewModel,
-} from "./types.js";
+  ReviewModelError,
+  abortedError,
+  httpStatusError,
+  malformedError,
+  missingKeyError,
+  normalizeThrown,
+  refusedError,
+  truncatedError,
+} from "./errors.js";
+import type { ModelRequest, ModelResult, ReviewModel } from "./types.js";
+
+type OpenAIErrorBody = {
+  error?: { message?: unknown; code?: unknown; type?: unknown };
+};
+
 export class OpenAIReviewModel implements ReviewModel {
   readonly provider = "openai";
   constructor(
     private readonly apiKey = process.env.OPENAI_API_KEY,
     private readonly endpoint = "https://api.openai.com/v1/chat/completions",
+    /** Test seam; defaults to the global fetch at call time. */
+    private readonly fetchImpl?: typeof fetch,
   ) {}
+
   /** Endpoint origin and path only: no credentials, query, or API key. */
   get identity(): string {
     try {
@@ -23,12 +36,26 @@ export class OpenAIReviewModel implements ReviewModel {
       return "openai-chat-completions/json-schema-v1@invalid-endpoint";
     }
   }
+
   async review(
     request: ModelRequest,
     signal: AbortSignal,
   ): Promise<ModelResult> {
-    if (!this.apiKey) throw new ModelError("Missing OPENAI_API_KEY", false);
-    const response = await fetch(this.endpoint, {
+    if (!this.apiKey) throw missingKeyError(this.provider, "OPENAI_API_KEY");
+    // An already-cancelled call must never reach the wire.
+    if (signal.aborted) throw abortedError(this.provider, signal);
+    try {
+      return await this.send(request, signal);
+    } catch (error) {
+      throw this.normalize(error, signal);
+    }
+  }
+
+  private async send(
+    request: ModelRequest,
+    signal: AbortSignal,
+  ): Promise<ModelResult> {
+    const response = await (this.fetchImpl ?? fetch)(this.endpoint, {
       method: "POST",
       signal,
       headers: {
@@ -49,41 +76,45 @@ export class OpenAIReviewModel implements ReviewModel {
         },
       }),
     });
-    if (!response.ok) {
-      const text = await response.text();
-      const retryAfter = Number(response.headers.get("retry-after"));
-      const retryable =
-        response.status === 408 ||
-        response.status === 409 ||
-        response.status === 429 ||
-        response.status >= 500;
-      throw new ModelError(
-        `OpenAI error ${response.status}: ${text.slice(0, 500)}`,
-        retryable,
-        Number.isFinite(retryAfter) ? retryAfter * 1000 : undefined,
-      );
-    }
-    const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+    if (!response.ok) throw await this.httpError(response);
+    let payload: {
+      choices?: Array<{
+        finish_reason?: string | null;
+        message?: { content?: string | null; refusal?: string | null };
+      }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
-    const content = payload.choices?.[0]?.message?.content;
+    try {
+      payload = await response.json();
+    } catch {
+      throw malformedError(this.provider, "OpenAI returned a non-JSON body");
+    }
+    const choice = payload.choices?.[0];
+    if (choice?.finish_reason === "length")
+      throw truncatedError(this.provider, "OpenAI");
+    if (choice?.finish_reason === "content_filter" || choice?.message?.refusal)
+      throw refusedError(this.provider, "OpenAI");
+    const content = choice?.message?.content;
     if (!content)
-      throw new ModelError(
+      throw malformedError(
+        this.provider,
         "OpenAI response did not include structured content",
-        true,
       );
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
     } catch {
-      throw new ModelError("OpenAI returned malformed JSON", true);
+      throw malformedError(this.provider, "OpenAI returned malformed JSON");
     }
     const validated = reviewResponseSchema.safeParse(parsed);
     if (!validated.success)
-      throw new ModelError(
-        `OpenAI output failed schema validation: ${validated.error.message}`,
-        true,
+      throw malformedError(
+        this.provider,
+        // Paths and issue codes only: zod messages can echo returned values.
+        `OpenAI output failed schema validation (${validated.error.issues
+          .slice(0, 3)
+          .map((issue) => issue.path.join(".") || "(root)")
+          .join(", ")})`,
       );
     return {
       response: validated.data,
@@ -93,5 +124,36 @@ export class OpenAIReviewModel implements ReviewModel {
         actual: payload.usage?.prompt_tokens !== undefined,
       },
     };
+  }
+
+  private async httpError(response: Response): Promise<ReviewModelError> {
+    let detail: string | undefined;
+    let code: string | undefined;
+    try {
+      const body = JSON.parse(await response.text()) as OpenAIErrorBody;
+      if (typeof body.error?.message === "string") detail = body.error.message;
+      const raw = body.error?.code ?? body.error?.type;
+      if (typeof raw === "string") code = raw;
+    } catch {
+      // A non-JSON error body is never echoed.
+    }
+    return httpStatusError({
+      provider: this.provider,
+      label: "OpenAI",
+      status: response.status,
+      detail,
+      code,
+      headers: response.headers,
+      secrets: [this.apiKey],
+    });
+  }
+
+  private normalize(error: unknown, signal: AbortSignal): ReviewModelError {
+    return normalizeThrown(error, {
+      provider: this.provider,
+      label: "OpenAI",
+      signal,
+      secrets: [this.apiKey],
+    });
   }
 }

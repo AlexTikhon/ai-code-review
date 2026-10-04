@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import type { CliArgs } from "../src/cli/args.js";
 import { resultExitCode } from "../src/cli/output.js";
 import type { ReviewConfig } from "../src/config/config.js";
-import { ModelError, type ReviewModel } from "../src/model/types.js";
+import type { ReviewModel } from "../src/model/types.js";
+import { modelError } from "./model-fixtures.js";
 import { runReviewPipeline } from "../src/review/pipeline.js";
 import type { ReviewSource } from "../src/review/types.js";
 import { unitTest } from "./helpers.js";
@@ -105,7 +106,7 @@ unitTest(
       provider: "test",
       review(request) {
         return request.user.includes("bad.ts")
-          ? Promise.reject(new ModelError("bad output", false))
+          ? Promise.reject(modelError("bad output", false))
           : valid("good.ts");
       },
     };
@@ -279,7 +280,8 @@ unitTest(
       ]),
     });
     assert.equal(result.status, "failed");
-    assert.match(result.errors[0]?.message ?? "", /invalid evidence/);
+    assert.equal(result.errors[0]?.code, "MODEL_INVALID_EVIDENCE");
+    assert.equal(result.errors[0]?.provider, "test");
   },
 );
 
@@ -373,7 +375,7 @@ unitTest(
       provider: "test",
       async review() {
         calls++;
-        throw new ModelError("retry", true);
+        throw modelError("retry", true);
       },
     };
     const result = await runReviewPipeline(args, {
@@ -405,7 +407,7 @@ unitTest(
       provider: "test",
       async review() {
         calls++;
-        throw new ModelError("retry", true);
+        throw modelError("retry", true);
       },
     };
     const files = ["a.ts", "b.ts"].map((filename) => ({

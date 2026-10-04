@@ -7,6 +7,7 @@ import {
   embeddingInputHash,
   normalizedEmbeddingInput,
 } from "./embedding-keys.js";
+import type { CheckpointEvent } from "./embedding-checkpoint.js";
 import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
 import { assessIndexCompatibility } from "./index-compat.js";
 import { parseRepositoryIndex } from "./index-schema.js";
@@ -62,7 +63,22 @@ export type IndexUpdateStats = {
   vectorsPruned: number;
   /** Real embedding API calls made. */
   embeddingRequests: number;
+  /** Vectors taken from the embedding checkpoint instead of the provider. */
+  vectorsFromCheckpoint: number;
+  /** Provider calls the checkpoint made unnecessary. */
+  embeddingRequestsAvoided: number;
+  /** Checkpoint writes during this run, and those that failed. */
+  checkpointSaves: number;
+  checkpointSaveFailures: number;
 };
+
+/** Where completed vectors are persisted while a run is still in progress. */
+export type CheckpointSink = {
+  save(vectors: readonly StoredVector[]): Promise<void>;
+};
+
+/** Embedding batches between periodic checkpoint writes. */
+export const DEFAULT_CHECKPOINT_EVERY_BATCHES = 8;
 
 export type IndexUpdateInput = {
   /** Previously persisted, schema-valid index; ignored unless compatible. */
@@ -76,6 +92,18 @@ export type IndexUpdateInput = {
   beforeEmbeddingRequest?: () => void;
   onEmbeddingRequest?: () => void;
   maxEmbeddingBatchSize?: number;
+  /**
+   * Completed vectors from an earlier unfinished run. They are reused only
+   * under exactly the rules that govern vectors of the previous index.
+   */
+  seedVectors?: readonly StoredVector[];
+  /**
+   * Receives the vectors this run has paid for: periodically, and once more
+   * if the run fails or is cancelled. A sink failure never fails the run.
+   */
+  checkpoint?: CheckpointSink;
+  checkpointEveryBatches?: number;
+  onCheckpoint?: (event: CheckpointEvent) => void;
   /** Test seams. */
   chunk?: typeof chunkSource;
   now?: () => number;
@@ -162,6 +190,10 @@ export async function updateRepositoryIndex(
     vectorsCreated: 0,
     vectorsPruned: 0,
     embeddingRequests: 0,
+    vectorsFromCheckpoint: 0,
+    embeddingRequestsAvoided: 0,
+    checkpointSaves: 0,
+    checkpointSaveFailures: 0,
   };
 
   const files: IndexedFile[] = [];
@@ -293,11 +325,21 @@ export async function updateRepositoryIndex(
   const vectors: Record<string, StoredVector> = {};
   if (embedding) {
     const identity = embeddingDimensionIdentity(embedding);
+    const sameSpace = (vector: StoredVector) =>
+      vector.provider === embedding.provider &&
+      vector.model === embedding.model &&
+      vector.version === embedding.version &&
+      vector.dimensionIdentity === identity;
+    const seeded = new Map<string, StoredVector>();
+    for (const vector of input.seedVectors ?? [])
+      if (validStoredVector(vector, wanted, maxChunkTokens))
+        seeded.set(vector.cacheKey, vector);
     const seenKeys = new Set<string>();
     const missing = new Map<
       string,
       { chunk: ContextChunk; inputHash: string }
     >();
+    const fromCheckpoint = new Map<string, StoredVector>();
     chunks.forEach((chunk, position) => {
       const inputHash = inputHashes[position]!;
       const cacheKey = embeddingCacheKeyForHash(
@@ -308,14 +350,12 @@ export async function updateRepositoryIndex(
       if (seenKeys.has(cacheKey)) return;
       seenKeys.add(cacheKey);
       const cached = retained[cacheKey];
-      if (
-        cached &&
-        cached.provider === embedding.provider &&
-        cached.model === embedding.model &&
-        cached.version === embedding.version &&
-        cached.dimensionIdentity === identity
-      ) {
+      const checkpointed = seeded.get(cacheKey);
+      if (cached && sameSpace(cached)) {
         stats.vectorsReused++;
+      } else if (checkpointed && sameSpace(checkpointed)) {
+        delete retained[cacheKey];
+        fromCheckpoint.set(cacheKey, checkpointed);
       } else {
         delete retained[cacheKey];
         missing.set(cacheKey, { chunk, inputHash });
@@ -323,38 +363,80 @@ export async function updateRepositoryIndex(
     });
     const pending = [...missing.entries()];
     const batchSize = Math.max(1, input.maxEmbeddingBatchSize ?? 32);
+    stats.vectorsFromCheckpoint = fromCheckpoint.size;
+    stats.embeddingRequestsAvoided =
+      Math.ceil((pending.length + fromCheckpoint.size) / batchSize) -
+      Math.ceil(pending.length / batchSize);
+    if (seeded.size > 0)
+      input.onCheckpoint?.(
+        fromCheckpoint.size > 0
+          ? {
+              type: "hit",
+              vectors: fromCheckpoint.size,
+              requestsAvoided: stats.embeddingRequestsAvoided,
+            }
+          : { type: "miss", vectors: pending.length },
+      );
     const created = new Map<string, StoredVector>();
-    for (let offset = 0; offset < pending.length; offset += batchSize) {
-      signal?.throwIfAborted();
-      const batch = pending.slice(offset, offset + batchSize);
-      input.beforeEmbeddingRequest?.();
-      // Reservation may itself have observed cancellation; never start a request after it.
-      signal?.throwIfAborted();
-      const embedded = await embedding.embed(
-        batch.map(([, { chunk }]) => normalizedEmbeddingInput(chunk)),
-        signal,
-      );
-      stats.embeddingRequests++;
-      input.onEmbeddingRequest?.();
-      const dimensions = validateEmbeddingBatch(
-        embedded,
-        batch.length,
-        embedding.dimensions,
-      );
-      batch.forEach(([cacheKey, { inputHash }], position) => {
-        created.set(cacheKey, {
-          cacheKey,
-          values: embedded[position]!,
-          inputHash,
-          dimensions,
-          provider: embedding.provider,
-          model: embedding.model,
-          version: embedding.version,
-          dimensionIdentity: identity,
-          chunkerVersion: CHUNKER_VERSION,
-          maxChunkTokens,
+    const everyBatches = Math.max(
+      1,
+      input.checkpointEveryBatches ?? DEFAULT_CHECKPOINT_EVERY_BATCHES,
+    );
+    let unsaved = 0;
+    /** Persist all paid work; a failing sink is reported, never thrown. */
+    const saveCheckpoint = async () => {
+      if (!input.checkpoint || unsaved === 0) return;
+      const all = [...fromCheckpoint.values(), ...created.values()];
+      try {
+        await input.checkpoint.save(all);
+        stats.checkpointSaves++;
+        unsaved = 0;
+        input.onCheckpoint?.({ type: "saved", vectors: all.length });
+      } catch {
+        stats.checkpointSaveFailures++;
+        input.onCheckpoint?.({ type: "save_failed" });
+      }
+    };
+    let batches = 0;
+    try {
+      for (let offset = 0; offset < pending.length; offset += batchSize) {
+        signal?.throwIfAborted();
+        const batch = pending.slice(offset, offset + batchSize);
+        input.beforeEmbeddingRequest?.();
+        // Reservation may itself have observed cancellation; never start a request after it.
+        signal?.throwIfAborted();
+        const embedded = await embedding.embed(
+          batch.map(([, { chunk }]) => normalizedEmbeddingInput(chunk)),
+          signal,
+        );
+        stats.embeddingRequests++;
+        input.onEmbeddingRequest?.();
+        const dimensions = validateEmbeddingBatch(
+          embedded,
+          batch.length,
+          embedding.dimensions,
+        );
+        batch.forEach(([cacheKey, { inputHash }], position) => {
+          created.set(cacheKey, {
+            cacheKey,
+            values: embedded[position]!,
+            inputHash,
+            dimensions,
+            provider: embedding.provider,
+            model: embedding.model,
+            version: embedding.version,
+            dimensionIdentity: identity,
+            chunkerVersion: CHUNKER_VERSION,
+            maxChunkTokens,
+          });
         });
-      });
+        unsaved += batch.length;
+        if (++batches % everyBatches === 0) await saveCheckpoint();
+      }
+    } catch (error) {
+      // Provider failure, exhausted budget or cancellation: keep what was paid for.
+      await saveCheckpoint();
+      throw error;
     }
     stats.vectorsCreated = created.size;
     // Chunk order first, so the persisted record is independent of history.
@@ -364,7 +446,10 @@ export async function updateRepositoryIndex(
         embedding,
         maxChunkTokens,
       );
-      const vector = created.get(cacheKey) ?? retained[cacheKey];
+      const vector =
+        created.get(cacheKey) ??
+        fromCheckpoint.get(cacheKey) ??
+        retained[cacheKey];
       if (vector) vectors[cacheKey] = vector;
     }
   }

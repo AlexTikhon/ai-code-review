@@ -14,10 +14,18 @@ import {
   INDEX_SCHEMA_VERSION,
   CHUNKER_VERSION,
   type RepositoryIndex,
+  type StoredVector,
 } from "./types.js";
 import type { chunkSource } from "./chunker.js";
 import type { EmbeddingAdapter } from "./embeddings.js";
+import {
+  FileEmbeddingCheckpointStore,
+  checkpointPath,
+  type CheckpointEvent,
+  type EmbeddingCheckpointStore,
+} from "./embedding-checkpoint.js";
 import { assessIndexCompatibility } from "./index-compat.js";
+import { salvageSchemaV1Vectors } from "./index-legacy.js";
 import { parseRepositoryIndex } from "./index-schema.js";
 import {
   updateRepositoryIndex,
@@ -58,7 +66,12 @@ export type IndexLoadResult =
   | { status: "missing" }
   | { status: "valid"; index: RepositoryIndex }
   | { status: "corrupt"; reason: string }
-  | { status: "incompatible"; reason: string }
+  | {
+      status: "incompatible";
+      reason: string;
+      /** Reusable vectors of a schema-1 index; see index-legacy.ts. */
+      salvagedVectors?: StoredVector[];
+    }
   | { status: "stale"; reason: string };
 
 export type IndexExpectation = {
@@ -95,6 +108,9 @@ export async function readIndex(
     return {
       status: "incompatible",
       reason: `schema version ${String(version)} != ${INDEX_SCHEMA_VERSION}`,
+      ...(version === 1
+        ? { salvagedVectors: salvageSchemaV1Vectors(raw) }
+        : {}),
     };
   const parsed = parseRepositoryIndex(raw);
   if (!parsed.ok) return { status: "corrupt", reason: parsed.reason };
@@ -187,6 +203,15 @@ export type RepositoryIndexInput = {
   /** Receives a safe, value-free reason when a persisted index is discarded. */
   onDiagnostic?: (message: string) => void;
   maxEmbeddingBatchSize?: number;
+  /**
+   * Where paid embedding work is kept if this run cannot finish. Defaults to a
+   * file next to the index; a test seam otherwise.
+   */
+  checkpointStore?: EmbeddingCheckpointStore;
+  /** Embedding batches between periodic checkpoint writes. */
+  checkpointEveryBatches?: number;
+  /** Counters and reasons about checkpoint use; never vectors or text. */
+  onCheckpoint?: (event: CheckpointEvent) => void;
   /**
    * Working-tree files whose size and mtime match the previous index are
    * assumed unchanged without being read (Git's own model, with recent mtimes
@@ -290,11 +315,41 @@ export async function refreshRepositoryIndex(
     input.onDiagnostic?.(
       `Persisted repository index was unusable (${loaded.reason}); rebuilt from source.`,
     );
-  else if (loaded.status === "incompatible")
+  else if (loaded.status === "incompatible") {
+    const salvaged = loaded.salvagedVectors?.length ?? 0;
     input.onDiagnostic?.(
-      `Persisted repository index was incompatible (${loaded.reason}); rebuilt from source.`,
+      `Persisted repository index was incompatible (${loaded.reason}); rebuilt from source.${
+        salvaged > 0 && input.embedding
+          ? ` ${salvaged} stored vectors were salvaged for reuse where their content still matches.`
+          : ""
+      }`,
     );
+  }
   const files = await scanSourceFiles(input);
+  // Checkpoints are only read when this run may embed: an unauthorized or dry
+  // run touches neither the provider nor the stored progress.
+  const checkpoint = input.embedding
+    ? (input.checkpointStore ??
+      new FileEmbeddingCheckpointStore(
+        checkpointPath(input.root, input.cacheDirName),
+      ))
+    : undefined;
+  let seedVectors: StoredVector[] =
+    checkpoint && loaded.status === "incompatible"
+      ? (loaded.salvagedVectors ?? [])
+      : [];
+  if (checkpoint) {
+    const stored = await checkpoint.load();
+    if (stored.status === "valid") {
+      seedVectors = [...seedVectors, ...stored.vectors];
+      input.onCheckpoint?.({ type: "loaded", vectors: stored.vectors.length });
+    } else if (stored.status !== "missing") {
+      input.onDiagnostic?.(
+        `Embedding checkpoint was ${stored.status} (${stored.reason}); ignored.`,
+      );
+      input.onCheckpoint?.({ type: "discarded", reason: stored.reason });
+    }
+  }
   const { index, stats } = await updateRepositoryIndex({
     previous: loaded.status === "valid" ? loaded.index : undefined,
     repositoryId: input.repositoryId,
@@ -306,9 +361,38 @@ export async function refreshRepositoryIndex(
     beforeEmbeddingRequest: input.beforeEmbeddingRequest,
     onEmbeddingRequest: input.onEmbeddingRequest,
     maxEmbeddingBatchSize: input.maxEmbeddingBatchSize,
+    seedVectors,
+    checkpoint,
+    checkpointEveryBatches: input.checkpointEveryBatches,
+    onCheckpoint: input.onCheckpoint,
     chunk: input.chunk,
   });
-  await writeFileAtomic(path, JSON.stringify(index));
+  try {
+    await writeFileAtomic(path, JSON.stringify(index));
+  } catch (error) {
+    // Everything was embedded but could not be published: keep the paid vectors.
+    if (checkpoint) {
+      const known = new Set(
+        loaded.status === "valid" ? Object.keys(loaded.index.vectors) : [],
+      );
+      const fresh = Object.values(index.vectors).filter(
+        (vector) => !known.has(vector.cacheKey),
+      );
+      if (fresh.length > 0)
+        await checkpoint.save(fresh).then(
+          () => input.onCheckpoint?.({ type: "saved", vectors: fresh.length }),
+          () => input.onCheckpoint?.({ type: "save_failed" }),
+        );
+    }
+    throw error;
+  }
+  // The canonical index now contains every vector the checkpoint held that
+  // is still wanted; what remains in it is obsolete.
+  if (checkpoint)
+    await checkpoint.clear().then(
+      () => input.onCheckpoint?.({ type: "cleared" }),
+      () => undefined,
+    );
   return { index, stats, loaded: loaded.status };
 }
 
