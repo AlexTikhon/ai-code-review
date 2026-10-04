@@ -142,3 +142,32 @@ export async function referenceRetrieve(
       deduped.set(c.chunk.contentHash, c);
   return [...deduped.values()].slice(0, topK);
 }
+
+/**
+ * Reference for the numeric semantic search alone: the pre-optimization scorer
+ * and selection, verbatim. Every row is scored (norms recomputed per pair),
+ * candidates are allocated for all rows, everything is stably sorted by score,
+ * and only then truncated. Ties therefore keep ascending row order.
+ */
+export function referenceSemanticRank(
+  rows: ReadonlyArray<ReadonlyArray<number>>,
+  query: ReadonlyArray<number>,
+  limit: number,
+): Array<{ ordinal: number; score: number }> {
+  const scored = rows.map((row, ordinal) => {
+    let dot = 0;
+    let aa = 0;
+    let bb = 0;
+    for (let i = 0; i < query.length; i++) {
+      dot += query[i]! * row[i]!;
+      aa += query[i]! ** 2;
+      bb += row[i]! ** 2;
+    }
+    return {
+      ordinal,
+      score: Math.max(0, aa && bb ? dot / Math.sqrt(aa * bb) : 0),
+    };
+  });
+  scored.sort((a, b) => b.score - a.score).splice(limit);
+  return scored;
+}

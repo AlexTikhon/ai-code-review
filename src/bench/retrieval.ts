@@ -1,5 +1,6 @@
 /**
- * Local benchmark for Retrieval / Repository Index V2. Not part of CI: it
+ * Local benchmark for the retrieval stack: lexical index, exact semantic
+ * search, and incremental indexing. Not part of CI: it
  * reports structural work (deterministic) and wall-clock time (supplemental).
  *
  *   npm run bench
@@ -20,17 +21,8 @@ import {
 } from "../retrieval/lexical-index.js";
 import type { ContextChunk, RetrievalCandidate } from "../retrieval/types.js";
 import { loadIgnorePolicy } from "../review/ignore.js";
-
-function prng(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+import { semanticBenchmark } from "./semantic.js";
+import { average, prng } from "./util.js";
 
 const VOCABULARY_SIZE = 4000;
 const word = (index: number) => `term${index.toString(36)}x`;
@@ -114,9 +106,6 @@ function fullScan(
     termLookups,
   };
 }
-
-const average = (values: number[]) =>
-  values.reduce((sum, value) => sum + value, 0) / values.length;
 
 function lexicalBenchmark(): void {
   const QUERIES = 50;
@@ -284,4 +273,5 @@ async function incrementalBenchmark(): Promise<void> {
 }
 
 lexicalBenchmark();
+await semanticBenchmark();
 await incrementalBenchmark();

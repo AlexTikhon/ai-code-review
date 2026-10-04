@@ -1,12 +1,37 @@
 import { embeddingInputHash } from "./index-store.js";
 import type { EmbeddingAdapter } from "./embeddings.js";
 import { buildLexicalIndex, type LexicalIndex } from "./lexical-index.js";
+import {
+  buildSemanticIndex,
+  type SemanticExactIndex,
+} from "./semantic-index.js";
 import type { ContextChunk, RepositoryIndex, StoredVector } from "./types.js";
 
 export type PreparedChunk = {
   readonly chunk: ContextChunk;
   /** Hash of the exact embedding input, computed once per run. */
   readonly inputHash: string;
+};
+
+/**
+ * Packed vectors for one embedding space, plus the ordinal -> chunk mapping.
+ * Row `o` of `index` is the vector of `chunks[o]`; the numeric search never
+ * touches `chunks`, which is read only for the few winning ordinals.
+ */
+export type SemanticSpace = {
+  readonly index: SemanticExactIndex;
+  readonly chunks: readonly ContextChunk[];
+};
+
+/**
+ * Packed spaces built so far, one per embedding identity. A repository index may
+ * hold vectors from several embedding spaces, and only the adapter in use is
+ * known at query time, so a space is packed on first use and then shared by
+ * every later query and review segment. `builds` makes that observable.
+ */
+export type SemanticSpaceCache = {
+  readonly spaces: Map<string, SemanticSpace>;
+  builds: number;
 };
 
 /**
@@ -27,6 +52,8 @@ export type PreparedRepositoryIndex = {
   readonly lexical: LexicalIndex;
   /** Stored vectors grouped by input hash, in persisted order. */
   readonly vectorsByInputHash: ReadonlyMap<string, readonly StoredVector[]>;
+  /** Exact-search vectors, packed lazily per embedding identity. */
+  readonly semantic: SemanticSpaceCache;
 };
 
 export function isPreparedIndex(
@@ -58,6 +85,7 @@ export function prepareRepositoryIndex(
     })),
     lexical: buildLexicalIndex(index.chunks),
     vectorsByInputHash,
+    semantic: { spaces: new Map(), builds: 0 },
   };
 }
 
@@ -83,4 +111,40 @@ export function findStoredVector(
         vector.chunkerVersion === index.chunkerVersion &&
         vector.maxChunkTokens === index.maxChunkTokens,
     );
+}
+
+/**
+ * The packed exact-search space for this embedding, built at most once per
+ * prepared index. Rows follow repository chunk order and include exactly the
+ * chunks findStoredVector resolves, so a chunk's vector is the same one the
+ * unpacked lookup would have used.
+ */
+export function semanticSpaceFor(
+  index: PreparedRepositoryIndex,
+  embedding: EmbeddingAdapter,
+): SemanticSpace {
+  const key = JSON.stringify([
+    embedding.provider,
+    embedding.model,
+    embedding.version,
+    embedding.dimensions ?? "provider-default",
+  ]);
+  const cached = index.semantic.spaces.get(key);
+  if (cached) return cached;
+  const chunks: ContextChunk[] = [];
+  const rows: number[][] = [];
+  for (const prepared of index.chunks) {
+    const stored = findStoredVector(index, prepared, embedding);
+    if (!stored) continue;
+    if (stored.dimensions !== stored.values.length)
+      throw new Error(
+        `Embedding vector dimension mismatch: stored=${stored.dimensions} but holds ${stored.values.length} values`,
+      );
+    chunks.push(prepared.chunk);
+    rows.push(stored.values);
+  }
+  const space: SemanticSpace = { index: buildSemanticIndex(rows), chunks };
+  index.semantic.spaces.set(key, space);
+  index.semantic.builds++;
+  return space;
 }

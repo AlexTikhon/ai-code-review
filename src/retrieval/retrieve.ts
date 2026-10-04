@@ -1,32 +1,17 @@
 import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
 import { rankLexicalCandidates } from "./lexical-index.js";
 import {
-  findStoredVector,
   isPreparedIndex,
   prepareRepositoryIndex,
+  semanticSpaceFor,
   type PreparedRepositoryIndex,
 } from "./prepared-index.js";
+import { searchSemanticIndex } from "./semantic-index.js";
 import type {
   ContextChunk,
   RepositoryIndex,
   RetrievalCandidate,
 } from "./types.js";
-
-function cosine(a: number[], b: number[]): number {
-  if (a.length !== b.length)
-    throw new Error(
-      `Embedding vector dimension mismatch: query=${a.length}, stored=${b.length}`,
-    );
-  let dot = 0;
-  let aa = 0;
-  let bb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i]! * b[i]!;
-    aa += a[i]! ** 2;
-    bb += b[i]! ** 2;
-  }
-  return aa && bb ? dot / Math.sqrt(aa * bb) : 0;
-}
 
 /**
  * Rank repository chunks for one review segment.
@@ -72,30 +57,21 @@ export async function retrieveContext(input: {
     input.signal?.throwIfAborted();
     input.beforeEmbeddingRequest?.();
     const vectors = await input.embedding.embed([input.query], input.signal);
-    const dimensions = validateEmbeddingBatch(
-      vectors,
-      1,
-      input.embedding.dimensions,
+    validateEmbeddingBatch(vectors, 1, input.embedding.dimensions);
+    // Packed once per prepared index. The search scores numbers only; chunk
+    // objects are resolved below for the winning ordinals alone.
+    const space = semanticSpaceFor(index, input.embedding);
+    const { hits } = searchSemanticIndex(
+      space.index,
+      vectors[0]!,
+      input.candidates,
     );
-    const queryVector = vectors[0]!;
-    for (const prepared of index.chunks) {
-      const stored = findStoredVector(index, prepared, input.embedding);
-      if (!stored) continue;
-      if (
-        stored.dimensions !== dimensions ||
-        stored.values.length !== dimensions
-      )
-        throw new Error(
-          `Embedding vector dimension mismatch: query=${dimensions}, stored=${stored.dimensions}`,
-        );
-      const score = Math.max(0, cosine(queryVector, stored.values));
+    for (const { ordinal, score } of hits)
       semantic.push({
-        chunk: prepared.chunk,
+        chunk: space.chunks[ordinal]!,
         score,
         reasons: [`semantic:${score.toFixed(3)}`],
       });
-    }
-    semantic.sort((a, b) => b.score - a.score).splice(input.candidates);
   }
 
   const union = new Map<

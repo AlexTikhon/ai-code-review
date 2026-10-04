@@ -16,6 +16,8 @@ import "./concurrency.test.js";
 import "./pipeline-architecture.test.js";
 import "./index-store.test.js";
 import "./prepared-retrieval.test.js";
+import "./semantic-index.test.js";
+import "./semantic-retrieval.test.js";
 import "./lexical-index.test.js";
 import "./index-update.test.js";
 import "./index-refresh.test.js";
