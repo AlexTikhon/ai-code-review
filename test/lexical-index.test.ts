@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { INDEX_SCHEMA_VERSION } from "../src/retrieval/types.js";
 import { POLICY_VERSION } from "../src/review/types.js";
-import { filesForChunks } from "./index-fixtures.js";
+import { filesForChunks, fixtureIndex } from "./index-fixtures.js";
 import { DeterministicTestEmbedding } from "../src/retrieval/embeddings.js";
 import {
   buildLexicalIndex,
@@ -17,6 +16,7 @@ import {
   CHUNKER_VERSION,
   type ContextChunk,
   type RepositoryIndex,
+  type StoredVector,
 } from "../src/retrieval/types.js";
 import { unitTest } from "./helpers.js";
 import { referenceLexical, referenceRetrieve } from "./reference-retrieval.js";
@@ -86,10 +86,9 @@ function chunk(
 
 function makeIndex(
   chunks: ContextChunk[],
-  vectors: RepositoryIndex["vectors"] = {},
+  vectors: StoredVector[] = [],
 ): RepositoryIndex {
-  return {
-    schemaVersion: INDEX_SCHEMA_VERSION,
+  return fixtureIndex({
     policyVersion: POLICY_VERSION,
     chunkerVersion: CHUNKER_VERSION,
     repositoryId: "r",
@@ -99,7 +98,7 @@ function makeIndex(
     files: filesForChunks(chunks),
     chunks,
     vectors,
-  };
+  });
 }
 
 function randomChunks(random: () => number, count: number): ContextChunk[] {
@@ -356,12 +355,12 @@ unitTest(
     const random = prng(424242);
     for (let round = 0; round < 6; round++) {
       const chunks = randomChunks(random, [3, 9, 30][round % 3]!);
-      const vectors: RepositoryIndex["vectors"] = {};
+      const vectors: StoredVector[] = [];
       // Vectors for only some chunks: vector-only and lexical-only candidates.
       for (const item of chunks)
         if (random() < 0.7) {
           const key = embeddingCacheKey(item, embedding, 200);
-          vectors[key] = {
+          vectors.push({
             cacheKey: key,
             values: (await embedding.embed([item.content]))[0]!,
             inputHash: embeddingInputHash(item),
@@ -372,7 +371,7 @@ unitTest(
             dimensionIdentity: "64",
             chunkerVersion: CHUNKER_VERSION,
             maxChunkTokens: 200,
-          };
+          });
         }
       const index = makeIndex(chunks, vectors);
       const prepared = prepareRepositoryIndex(index);

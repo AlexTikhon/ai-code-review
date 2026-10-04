@@ -19,7 +19,51 @@ These numbers validate pipeline plumbing and demonstrate the intended context ef
 
 ## Retrieval benchmarks
 
-`npm run bench` is local, not part of CI, and asserts no timings. It prints the lexical index comparison, the semantic search comparison and the incremental-index run. The semantic section compares the pre-optimization scorer (norms recomputed per pair, a candidate per vector, full sort) against the packed exact scorer on synthetic 1,536-dimension vectors at 1,000 to 100,000 vectors and K of 3, 10, 20 and 50. Every measured query first asserts that both return identical hits. Wall-clock values are medians of five measured passes after a warm-up pass, which makes them indicative only; the structural counters (multiply-adds, norm accumulations, allocations, sort comparisons) are deterministic. It also reports one-time packing cost, packed memory against the resident unpacked copy, and the real `retrieveContext` hybrid path with the lexical-only cost subtracted. Equality with the reference is also enforced in `npm test` over seeded random cases.
+`npm run bench` is local, not part of CI, and asserts no timings. It prints the lexical index comparison, the semantic search comparison, a short persistence comparison and the incremental-index run. The semantic section compares the pre-optimization scorer (norms recomputed per pair, a candidate per vector, full sort) against the packed exact scorer on synthetic 1,536-dimension vectors at 1,000 to 100,000 vectors and K of 3, 10, 20 and 50. Every measured query first asserts that both return identical hits. Wall-clock values are medians of five measured passes after a warm-up pass, which makes them indicative only; the structural counters (multiply-adds, norm accumulations, allocations, sort comparisons) are deterministic. It also reports one-time packing cost, packed memory against the resident unpacked copy, and the real `retrieveContext` hybrid path with the lexical-only cost subtracted. Equality with the reference is also enforced in `npm test` over seeded random cases.
+
+## Persistence benchmark
+
+`npm run bench:persistence` (a short version also runs inside `npm run bench`) compares the previous layout, one JSON file with every vector as a number array, with the current manifest + metadata + binary blob layout on synthetic 1,536-dimension vectors with 9 significant digits (what an embedding API returns). Every cell is measured in its own process with a forced GC before each memory reading; times are the median of two or three runs after a discarded warm-up (a single run above 25,000 vectors). The "old" column reproduces the previous load path (read, `JSON.parse`, Zod validation, hashing, lexical build, packing with the parsed index retained); its memory matches what the real previous code measured before this change (for 5,000 vectors 225 MiB of heap including about 53 MiB of tooling baseline, here 172 MiB net). One run on a 16-core Windows machine with 16 GB, Node 24:
+
+| Vectors | Old JSON     | New blob + metadata | Reduction |
+| ------- | ------------ | ------------------- | --------- |
+| 1,000   | 21 MiB       | 12 + 0.4 MiB        | 1.70×     |
+| 5,000   | 103 MiB      | 59 + 2.2 MiB        | 1.70×     |
+| 10,000  | 207 MiB      | 117 + 4.5 MiB       | 1.70×     |
+| 17,000  | 352 MiB      | 199 + 7.7 MiB       | 1.70×     |
+| 25,000  | cannot write | 293 + 11 MiB        | n/a       |
+| 100,000 | cannot write | 1,172 + 46 MiB      | n/a       |
+
+The disk saving is modest because API embeddings serialize to about 13 bytes of JSON per number against 8 bytes of binary; full-precision doubles (about 20 characters) would save more. The larger effect is a hard limit: the old format is one JSON string, and Node cannot create strings beyond about 512 MiB, so writing a 1,536-dimension index fails (`Invalid string length`) at roughly 24,000 vectors. The new layout has no such ceiling (the 100,000-vector run above is 1.2 GiB).
+
+Ready to query (read, validate, prepare, pack; milliseconds):
+
+| Vectors | Old   | New   | Speedup |
+| ------- | ----- | ----- | ------- |
+| 1,000   | 105   | 32    | 3.3×    |
+| 5,000   | 413   | 120   | 3.5×    |
+| 10,000  | 795   | 201   | 4.0×    |
+| 17,000  | 1,288 | 343   | 3.8×    |
+| 25,000  | n/a   | 482   | n/a     |
+| 50,000  | n/a   | 882   | n/a     |
+| 100,000 | n/a   | 1,994 | n/a     |
+
+At 100,000 vectors the new load is about 1.7 s of reading, hashing and norms (read the blob 468 ms, SHA-256 536 ms, norms and finiteness 137 ms, metadata parse 205 ms measured separately), 216 ms to prepare and 32 ms to build the search space (which is the loaded array itself). The checksum is therefore about a quarter of the load. Norms are 7%, which is why they stay derived at load instead of being persisted.
+
+Steady-state memory once ready, MiB above the bare process (heap holds JS objects; array buffers hold typed-array storage; RSS is what the OS reports resident and can stay high after memory is freed; peak is the OS-reported peak of the whole run, including loading):
+
+| Vectors | Old heap | Old buffers | Old RSS | Old peak | New heap | New buffers | New RSS | New peak |
+| ------- | -------- | ----------- | ------- | -------- | -------- | ----------- | ------- | -------- |
+| 5,000   | 172      | 59          | 361     | 522      | 8        | 59          | 123     | 327      |
+| 10,000  | 340      | 117         | 605     | 795      | 15       | 117         | 197     | 449      |
+| 17,000  | 577      | 199         | 941     | 1,153    | 26       | 199         | 355     | 691      |
+| 100,000 | n/a      | n/a         | n/a     | n/a      | 142      | 1,173       | 1,537   | 2,849    |
+
+The old heap column is the unpacked `number[][]` (about 34 KiB per vector) that used to stay resident next to the packed array; the new heap is metadata and lookup tables only, and the one packed copy is what remains in buffers. Measurement limits: Node reports no true peak for its own heap, so peak is the OS working-set peak; RSS includes freed-but-retained pages; numbers are for this machine and a single synthetic one-space index.
+
+Exact search, median milliseconds per query at K=20, is unchanged: 1,000 vectors 0.75 old / 0.63 new; 5,000 3.16 / 3.52; 10,000 6.06 / 5.94; 17,000 9.77 / 9.89; 100,000 73 (new only). Separate-process timings of this kind move by up to 25% between runs; an in-process A/B of the same data as a plain `Float64Array` and as the loaded view, interleaved, gave 5.96 and 6.32 ms/query at 10,000 vectors and 11.69 and 11.40 at 17,000, i.e. no difference attributable to the layout.
+
+Incremental refresh of a persisted index with three edited files (load, update, publish; milliseconds): 25,000 vectors 444 / 269 / 666; 100,000 vectors 1,808 / 1,498 / 3,294, with 99,996 vectors reused as row copies, 8 embedded (the provider stub was asked for exactly those), 4 pruned, and a peak of about 3.0 GiB because the previous and the next store coexist while the next one is written. No old vector is ever parsed or converted to a JS array on this path.
 
 ## Optional live evaluation
 

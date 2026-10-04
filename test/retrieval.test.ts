@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import { INDEX_SCHEMA_VERSION } from "../src/retrieval/types.js";
 import { POLICY_VERSION } from "../src/review/types.js";
-import { filesForChunks } from "./index-fixtures.js";
+import { filesForChunks, fixtureIndex } from "./index-fixtures.js";
 import { chunkSource } from "../src/retrieval/chunker.js";
 import { DeterministicTestEmbedding } from "../src/retrieval/embeddings.js";
 import { retrieveContext } from "../src/retrieval/retrieve.js";
-import {
-  CHUNKER_VERSION,
-  type RepositoryIndex,
-} from "../src/retrieval/types.js";
+import { CHUNKER_VERSION, type StoredVector } from "../src/retrieval/types.js";
 import { unitTest } from "./helpers.js";
 import { estimateTokens } from "../src/review/patch.js";
 import { execFile } from "node:child_process";
@@ -60,7 +56,7 @@ unitTest(
       }),
     ];
     const embedding = new DeterministicTestEmbedding();
-    const vectors: RepositoryIndex["vectors"] = {};
+    const vectors: Record<string, StoredVector> = {};
     for (const chunk of chunks) {
       const key = embeddingCacheKey(chunk, embedding, 100);
       const values = (await embedding.embed([chunk.content]))[0]!;
@@ -77,8 +73,7 @@ unitTest(
         maxChunkTokens: 100,
       };
     }
-    const index: RepositoryIndex = {
-      schemaVersion: INDEX_SCHEMA_VERSION,
+    const index = fixtureIndex({
       policyVersion: POLICY_VERSION,
       chunkerVersion: CHUNKER_VERSION,
       repositoryId: "r",
@@ -88,7 +83,7 @@ unitTest(
       files: filesForChunks(chunks),
       chunks,
       vectors,
-    };
+    });
     const lexical = await retrieveContext({
       index,
       repositoryId: "r",
@@ -119,8 +114,7 @@ unitTest(
 unitTest(
   "retrieval refuses stale revisions and repository crossover",
   async () => {
-    const index: RepositoryIndex = {
-      schemaVersion: INDEX_SCHEMA_VERSION,
+    const index = fixtureIndex({
       policyVersion: POLICY_VERSION,
       chunkerVersion: CHUNKER_VERSION,
       repositoryId: "a",
@@ -129,8 +123,7 @@ unitTest(
       createdAt: "now",
       files: filesForChunks([]),
       chunks: [],
-      vectors: {},
-    };
+    });
     const base = {
       index,
       query: "x",
@@ -301,7 +294,7 @@ unitTest(
         return [[1, 0]];
       },
     };
-    const vectors: RepositoryIndex["vectors"] = {};
+    const vectors: Record<string, StoredVector> = {};
     for (const [chunk, values] of [
       [noise, [0, 1]],
       [relevant, [1, 0]],
@@ -321,8 +314,7 @@ unitTest(
       };
     }
     const found = await retrieveContext({
-      index: {
-        schemaVersion: INDEX_SCHEMA_VERSION,
+      index: fixtureIndex({
         policyVersion: POLICY_VERSION,
         chunkerVersion: CHUNKER_VERSION,
         repositoryId: "r",
@@ -332,7 +324,7 @@ unitTest(
         files: filesForChunks([noise, relevant]),
         chunks: [noise, relevant],
         vectors,
-      },
+      }),
       repositoryId: "r",
       revision: "v",
       query: "query",
@@ -368,8 +360,7 @@ unitTest(
     const key = embeddingCacheKey(chunk, embedding, 100);
     await assert.rejects(
       retrieveContext({
-        index: {
-          schemaVersion: INDEX_SCHEMA_VERSION,
+        index: fixtureIndex({
           policyVersion: POLICY_VERSION,
           chunkerVersion: CHUNKER_VERSION,
           repositoryId: "r",
@@ -392,7 +383,7 @@ unitTest(
               maxChunkTokens: 100,
             },
           },
-        },
+        }),
         repositoryId: "r",
         revision: "v",
         query: "value",
@@ -506,7 +497,7 @@ unitTest(
       embedding,
     });
     const firstCount = embedded;
-    const firstKeys = Object.keys(first.vectors);
+    const firstKeys = first.vectors.keys();
     await buildRepositoryIndex({ ...common, revision: "lexical" });
     await buildRepositoryIndex({
       ...common,
@@ -528,7 +519,7 @@ unitTest(
       embedded > firstCount,
       "renaming changes the exact embedding input",
     );
-    assert.notDeepEqual(Object.keys(renamed.vectors), firstKeys);
+    assert.notDeepEqual(renamed.vectors.keys(), firstKeys);
   },
 );
 
@@ -542,8 +533,7 @@ unitTest("same-file helper context remains retrievable", async () => {
     maxTokens: 200,
   });
   const result = await retrieveContext({
-    index: {
-      schemaVersion: INDEX_SCHEMA_VERSION,
+    index: fixtureIndex({
       policyVersion: POLICY_VERSION,
       chunkerVersion: CHUNKER_VERSION,
       repositoryId: "r",
@@ -552,8 +542,7 @@ unitTest("same-file helper context remains retrievable", async () => {
       createdAt: "now",
       files: filesForChunks(chunks),
       chunks,
-      vectors: {},
-    },
+    }),
     repositoryId: "r",
     revision: "v",
     query: "parseLimit input",

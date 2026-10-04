@@ -81,6 +81,39 @@ export function buildSemanticIndex(
   return { dimensions, count, vectors, squaredNorms };
 }
 
+/**
+ * Squared norms of `count` already-packed rows, accumulated in dimension order
+ * exactly like buildSemanticIndex, so a packed row scores identically however it
+ * was loaded. This is also the single finiteness pass for packed data: a finite
+ * sum of squares proves every value finite, and only on the failure path is the
+ * row rescanned to tell a non-finite value from an overflowing norm.
+ */
+export function packedSquaredNorms(
+  vectors: Float64Array,
+  count: number,
+  dimensions: number,
+): Float64Array {
+  if (vectors.length !== count * dimensions)
+    throw new Error("Packed vectors do not match the declared count and size");
+  const squaredNorms = new Float64Array(count);
+  for (let row = 0; row < count; row++) {
+    const offset = row * dimensions;
+    let sum = 0;
+    for (let d = 0; d < dimensions; d++) {
+      const value = vectors[offset + d]!;
+      sum += value * value;
+    }
+    if (!Number.isFinite(sum)) {
+      for (let d = 0; d < dimensions; d++)
+        if (!Number.isFinite(vectors[offset + d]!))
+          throw new Error("Embedding vectors must contain only finite values");
+      throw new Error("Embedding vector norm is not finite");
+    }
+    squaredNorms[row] = sum;
+  }
+  return squaredNorms;
+}
+
 /** Cosine similarity clamped at 0; every degenerate case scores 0. */
 function similarity(dot: number, queryNorm: number, storedNorm: number) {
   if (queryNorm === 0 || storedNorm === 0) return 0;

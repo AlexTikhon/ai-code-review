@@ -77,6 +77,15 @@ export async function contextStage(
             : "complete",
           { message: `checkpoint_${type}`, data },
         ),
+      // Sizes, counts and reasons about loading/migrating/publishing; no vectors.
+      onStoreEvent: ({ type, ...data }) =>
+        emitEvent(
+          ctx.events,
+          ctx.runId,
+          "index_store",
+          type === "migration_failed" ? "warning" : "complete",
+          { message: type, data },
+        ),
     });
     const prepared = prepareRepositoryIndex(index);
     const messages = [
@@ -92,7 +101,7 @@ export async function contextStage(
       data: {
         revision: source.snapshotId,
         chunks: index.chunks.length,
-        vectors: Object.keys(index.vectors).length,
+        vectors: index.vectors.count,
         semantic: Boolean(embedding),
         // Counters only: never file names, source text, or vectors.
         loaded,

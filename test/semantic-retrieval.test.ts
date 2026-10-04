@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { refreshRepositoryIndex } from "../src/retrieval/index-store.js";
+import {
+  indexPath,
+  readIndex,
+  refreshRepositoryIndex,
+} from "../src/retrieval/index-store.js";
 import {
   findStoredVector,
   prepareRepositoryIndex,
@@ -8,7 +12,12 @@ import {
 } from "../src/retrieval/prepared-index.js";
 import { retrieveContext } from "../src/retrieval/retrieve.js";
 import type { RepositoryIndex } from "../src/retrieval/types.js";
+import {
+  refValues,
+  vectorStoreFromStored,
+} from "../src/retrieval/vector-store.js";
 import { unitTest } from "./helpers.js";
+import { storedVectors } from "./index-fixtures.js";
 import {
   indexOptions,
   probedEmbedding,
@@ -113,12 +122,13 @@ unitTest(
   async () => {
     const { adapter, index } = await indexed();
     // Drop every other vector: ordinals must follow vectors, not chunk positions.
-    const kept = Object.fromEntries(
-      Object.entries(index.vectors).filter((_, i) => i % 2 === 0),
-    );
-    const prepared = prepareRepositoryIndex({ ...index, vectors: kept });
+    const kept = storedVectors(index).filter((_, i) => i % 2 === 0);
+    const prepared = prepareRepositoryIndex({
+      ...index,
+      vectors: vectorStoreFromStored(kept),
+    });
     const space = semanticSpaceFor(prepared, adapter);
-    assert.equal(space.index.count, Object.keys(kept).length);
+    assert.equal(space.index.count, kept.length);
     assert.equal(space.chunks.length, space.index.count);
     const { dimensions, vectors } = space.index;
     space.chunks.forEach((chunk, ordinal) => {
@@ -129,7 +139,7 @@ unitTest(
       )!;
       assert.deepEqual(
         [...vectors.subarray(ordinal * dimensions, (ordinal + 1) * dimensions)],
-        stored.values,
+        [...refValues(stored)],
       );
     });
     const ordinalsInRepositoryOrder = space.chunks.map((chunk) =>
@@ -147,25 +157,21 @@ unitTest(
   "vectors of other embedding spaces never enter the packed rows",
   async () => {
     const { adapter, index } = await indexed();
-    const foreign = Object.fromEntries(
-      Object.entries(index.vectors).map(([key, vector]) => [
-        `other-${key}`,
-        {
-          ...vector,
-          cacheKey: `other-${key}`,
-          provider: "other",
-          dimensionIdentity: "3",
-          dimensions: 3,
-          values: [1, 2, 3],
-        },
-      ]),
-    );
+    const own = storedVectors(index);
+    const foreign = own.map((vector) => ({
+      ...vector,
+      cacheKey: `other-${vector.cacheKey}`,
+      provider: "other",
+      dimensionIdentity: "3",
+      dimensions: 3,
+      values: [1, 2, 3],
+    }));
     const prepared = prepareRepositoryIndex({
       ...index,
-      vectors: { ...index.vectors, ...foreign },
+      vectors: vectorStoreFromStored([...own, ...foreign]),
     });
     const space = semanticSpaceFor(prepared, adapter);
-    assert.equal(space.index.count, Object.keys(index.vectors).length);
+    assert.equal(space.index.count, index.vectors.count);
     assert.equal(space.index.dimensions, 64);
     const other = semanticSpaceFor(prepared, {
       provider: "other",
@@ -179,38 +185,38 @@ unitTest(
   },
 );
 
-unitTest("a malformed stored vector fails retrieval clearly", async () => {
-  const { adapter, index } = await indexed();
-  const firstKey = Object.keys(index.vectors)[0]!;
-  const mutate = (change: (values: number[]) => number[]) => ({
-    ...index,
-    vectors: {
-      ...index.vectors,
-      [firstKey]: {
-        ...index.vectors[firstKey]!,
-        values: change([...index.vectors[firstKey]!.values]),
-      },
-    },
-  });
-  await assert.rejects(
-    hybrid(
-      mutate((values) => values.slice(1)),
-      adapter,
-      "work",
-      "src/m1.ts",
-    ),
-    /dimension mismatch/,
-  );
-  await assert.rejects(
-    hybrid(
-      mutate((values) => [Number.NaN, ...values.slice(1)]),
-      adapter,
-      "work",
-      "src/m1.ts",
-    ),
-    /finite/,
-  );
-});
+unitTest(
+  "malformed vectors cannot enter a store, and mixed widths fail retrieval clearly",
+  async () => {
+    const { adapter, index } = await indexed();
+    const [first, ...rest] = storedVectors(index);
+    // A vector of the wrong length or with non-finite values never gets packed.
+    assert.throws(
+      () =>
+        vectorStoreFromStored([{ ...first!, values: first!.values.slice(1) }]),
+      /declared dimensions/,
+    );
+    assert.throws(
+      () =>
+        vectorStoreFromStored([
+          { ...first!, values: [Number.NaN, ...first!.values.slice(1)] },
+        ]),
+      /finite/,
+    );
+    // Two widths under one embedding identity are separate segments; a search
+    // that would need both rows in one matrix fails instead of mis-scoring.
+    const narrow = { ...first!, values: [1, 2, 3], dimensions: 3 };
+    await assert.rejects(
+      hybrid(
+        { ...index, vectors: vectorStoreFromStored([narrow, ...rest]) },
+        adapter,
+        "work",
+        "src/m1.ts",
+      ),
+      /dimension mismatch/,
+    );
+  },
+);
 
 unitTest(
   "hybrid still returns semantic-only chunks with zero lexical score",
@@ -246,10 +252,12 @@ unitTest("packed hybrid retrieval equals the reference algorithm", async () => {
 });
 
 unitTest("a persisted and reloaded index packs identically", async () => {
-  const { adapter, index } = await indexed();
+  const { adapter, index, root } = await indexed();
+  const loaded = await readIndex(indexPath(root, ".cache"));
+  assert.equal(loaded.status, "valid");
   const fresh = prepareRepositoryIndex(index);
   const reloaded = prepareRepositoryIndex(
-    JSON.parse(JSON.stringify(index)) as RepositoryIndex,
+    (loaded as { status: "valid"; index: RepositoryIndex }).index,
   );
   const a = semanticSpaceFor(fresh, adapter);
   const b = semanticSpaceFor(reloaded, adapter);

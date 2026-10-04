@@ -1,3 +1,5 @@
+import type { VectorStore } from "./vector-store.js";
+
 export const CHUNKER_VERSION = "ts-js-ast-v2";
 export type ContextChunk = {
   id: string;
@@ -17,6 +19,11 @@ export type ContextChunk = {
   contentComplete: boolean;
   omissionReason?: string;
 };
+/**
+ * One embedding vector as plain data. Used where vectors travel as JSON (the
+ * embedding checkpoint, schema-1/2 files) and for what a provider just returned;
+ * a loaded RepositoryIndex holds its vectors in a VectorStore instead.
+ */
 export type StoredVector = {
   cacheKey: string;
   values: number[];
@@ -29,8 +36,14 @@ export type StoredVector = {
   chunkerVersion: string;
   maxChunkTokens: number;
 };
-/** Version of the persisted RepositoryIndex layout. */
-export const INDEX_SCHEMA_VERSION = 2;
+/**
+ * Version of the persisted RepositoryIndex layout.
+ *   1: vectors as JSON, no policy/file table (vectors salvaged only; see index-legacy.ts)
+ *   2: one JSON file holding chunks and every vector as a number array
+ *      (migrated on load without re-embedding; see index-legacy.ts)
+ *   3: manifest + metadata JSON + binary vector blob (see index-generation.ts)
+ */
+export const INDEX_SCHEMA_VERSION = 3;
 /**
  * Identity of one indexed source file: what is needed to decide, without
  * re-chunking, whether its chunks can be reused. Reuse depends on content
@@ -61,7 +74,13 @@ export type RepositoryIndex = {
   /** Per-file identity, in repository order; owns every chunk exactly once. */
   files: IndexedFile[];
   chunks: ContextChunk[];
-  vectors: Record<string, StoredVector>;
+  /**
+   * Hash of the exact embedding input of `chunks[i]`, persisted so unchanged
+   * chunks are never re-hashed just to find their vector. See embedding-keys.ts.
+   */
+  inputHashes: string[];
+  /** Every stored vector, packed; there is no number[][] copy anywhere. */
+  vectors: VectorStore;
 };
 export type RetrievalCandidate = {
   chunk: ContextChunk;

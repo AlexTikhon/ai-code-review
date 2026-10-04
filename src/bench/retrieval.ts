@@ -21,6 +21,7 @@ import {
 } from "../retrieval/lexical-index.js";
 import type { ContextChunk, RetrievalCandidate } from "../retrieval/types.js";
 import { loadIgnorePolicy } from "../review/ignore.js";
+import { persistenceBenchmark, QUICK } from "./persistence.js";
 import { semanticBenchmark } from "./semantic.js";
 import { average, prng } from "./util.js";
 
@@ -274,4 +275,5 @@ async function incrementalBenchmark(): Promise<void> {
 
 lexicalBenchmark();
 await semanticBenchmark();
+await persistenceBenchmark(QUICK);
 await incrementalBenchmark();

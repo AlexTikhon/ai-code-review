@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { INDEX_SCHEMA_VERSION } from "../src/retrieval/types.js";
 import { POLICY_VERSION } from "../src/review/types.js";
-import { filesForChunks } from "./index-fixtures.js";
+import { filesForChunks, fixtureIndex } from "./index-fixtures.js";
+import { refInputHash } from "../src/retrieval/vector-store.js";
 import { chunkSource } from "../src/retrieval/chunker.js";
 import { DeterministicTestEmbedding } from "../src/retrieval/embeddings.js";
 import {
@@ -17,6 +17,7 @@ import {
   CHUNKER_VERSION,
   type ContextChunk,
   type RepositoryIndex,
+  type StoredVector,
 } from "../src/retrieval/types.js";
 import { unitTest } from "./helpers.js";
 import { referenceRetrieve } from "./reference-retrieval.js";
@@ -55,11 +56,11 @@ async function buildIndex(
       }),
     );
   }
-  const vectors: RepositoryIndex["vectors"] = {};
+  const vectors: StoredVector[] = [];
   if (withVectors)
     for (const chunk of chunks) {
       const key = embeddingCacheKey(chunk, embedding, 200);
-      vectors[key] = {
+      vectors.push({
         cacheKey: key,
         values: (await embedding.embed([chunk.content]))[0]!,
         inputHash: embeddingInputHash(chunk),
@@ -70,10 +71,9 @@ async function buildIndex(
         dimensionIdentity: "64",
         chunkerVersion: CHUNKER_VERSION,
         maxChunkTokens: 200,
-      };
+      });
     }
-  return {
-    schemaVersion: INDEX_SCHEMA_VERSION,
+  return fixtureIndex({
     policyVersion: POLICY_VERSION,
     chunkerVersion: CHUNKER_VERSION,
     repositoryId: "r",
@@ -83,7 +83,7 @@ async function buildIndex(
     files: filesForChunks(chunks),
     chunks,
     vectors,
-  };
+  });
 }
 
 const queries: Array<[string, string]> = [
@@ -189,20 +189,20 @@ unitTest(
 unitTest("stored-vector lookup touches only the matching group", async () => {
   const index = await buildIndex(60);
   let providerReads = 0;
-  for (const vector of Object.values(index.vectors)) {
-    const provider = vector.provider;
-    Object.defineProperty(vector, "provider", {
+  for (const segment of index.vectors.segments) {
+    const space = segment.space;
+    Object.defineProperty(segment, "space", {
       enumerable: true,
       get() {
         providerReads++;
-        return provider;
+        return space;
       },
     });
   }
   const prepared = prepareRepositoryIndex(index);
   providerReads = 0;
   const found = findStoredVector(prepared, prepared.chunks[17]!, embedding);
-  assert.equal(found?.inputHash, prepared.chunks[17]!.inputHash);
+  assert.equal(found && refInputHash(found), prepared.chunks[17]!.inputHash);
   assert.ok(
     providerReads <= 2,
     `expected a constant-size lookup, read provider ${providerReads} times`,
@@ -265,8 +265,7 @@ unitTest("identical chunk content is returned once per query", async () => {
   const hash = chunks[0]!.contentHash;
   const aligned = chunks.map((chunk) => ({ ...chunk, contentHash: hash }));
   const result = await retrieveContext({
-    index: {
-      schemaVersion: INDEX_SCHEMA_VERSION,
+    index: fixtureIndex({
       policyVersion: POLICY_VERSION,
       chunkerVersion: CHUNKER_VERSION,
       repositoryId: "r",
@@ -275,8 +274,7 @@ unitTest("identical chunk content is returned once per query", async () => {
       createdAt: "now",
       files: filesForChunks(aligned),
       chunks: aligned,
-      vectors: {},
-    },
+    }),
     repositoryId: "r",
     revision: "v",
     query: "shared duplicate body",

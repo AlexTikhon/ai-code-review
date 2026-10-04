@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { writeFileAtomic } from "../cache/atomic-write.js";
 import {
   inspectContainedRegularFile,
   inspectSensitiveContent,
@@ -24,14 +24,22 @@ import {
   type CheckpointEvent,
   type EmbeddingCheckpointStore,
 } from "./embedding-checkpoint.js";
+import {
+  persistedRefsOf,
+  publishIndex,
+  readGeneration,
+  type GenerationFileOps,
+  type LoadInfo,
+} from "./index-generation.js";
 import { assessIndexCompatibility } from "./index-compat.js";
-import { salvageSchemaV1Vectors } from "./index-legacy.js";
-import { parseRepositoryIndex } from "./index-schema.js";
+import { migrateSchemaV2, salvageSchemaV1Vectors } from "./index-legacy.js";
+import { parseManifest } from "./index-schema.js";
 import {
   updateRepositoryIndex,
   type IndexUpdateStats,
   type SourceFileRef,
 } from "./index-update.js";
+import { materializeVector } from "./vector-store.js";
 
 export {
   embeddingCacheKey,
@@ -51,20 +59,29 @@ export function indexPath(root: string, cacheDirName: string): string {
 /**
  * Outcome of reading the persisted index. Nothing here is trusted until it has
  * passed the runtime schema:
- * - missing:      no file; build from scratch.
- * - corrupt:      unreadable, not JSON, or a schema/consistency violation.
+ * - missing:      no manifest or index file; build from scratch.
+ * - corrupt:      unreadable, not JSON, a schema/consistency violation, or a
+ *                 manifest whose generation is incomplete, truncated, altered or
+ *                 mismatched. Never reported as an empty index.
  * - incompatible: well-formed but made by a different schema, chunker, chunk
  *                 budget, privacy policy or repository, so none of it is reused.
  * - stale:        compatible, but built for a different revision than the
  *                 caller required. Index refresh does not require one: a moved
  *                 revision is the normal case and is reconciled file by file.
- * - valid:        reusable.
+ * - valid:        reusable. `migratedFromSchema` is set when it was upgraded in
+ *                 memory from an older layout (nothing has been written yet).
  * Derived data is never repaired; callers rebuild from source and report the
  * reason instead.
  */
 export type IndexLoadResult =
   | { status: "missing" }
-  | { status: "valid"; index: RepositoryIndex }
+  | {
+      status: "valid";
+      index: RepositoryIndex;
+      migratedFromSchema?: number;
+      /** Counters about a schema-3 load; absent for an in-memory migration. */
+      info?: LoadInfo;
+    }
   | { status: "corrupt"; reason: string }
   | {
       status: "incompatible";
@@ -82,45 +99,143 @@ export type IndexExpectation = {
   revision?: string;
 };
 
+/** Value-free progress notes about persistence: counts, sizes and reasons only. */
+export type IndexStoreEvent =
+  | {
+      type: "loaded";
+      vectors: number;
+      vectorBytes: number;
+      metadataBytes: number;
+      zeroCopy: boolean;
+      durationMs: number;
+    }
+  | { type: "migration_started"; fromSchemaVersion: number; vectors: number }
+  | {
+      type: "migration_completed";
+      fromSchemaVersion: number;
+      vectors: number;
+      vectorBytes: number;
+      durationMs: number;
+    }
+  | { type: "migration_failed"; fromSchemaVersion: number; reason: string }
+  | {
+      type: "published";
+      generation: string;
+      vectors: number;
+      vectorBytes: number;
+      metadataBytes: number;
+      vectorBlobReused: boolean;
+      durationMs: number;
+    }
+  | { type: "cleanup"; removed: number; failed: number };
+
+/** Tries when a concurrent publisher retires files between manifest and data reads. */
+const READ_ATTEMPTS = 3;
+
 export async function readIndex(
   path: string,
   expected: IndexExpectation = {},
 ): Promise<IndexLoadResult> {
+  let last: IndexLoadResult = { status: "missing" };
+  for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
+    const { result, manifestText, raced } = await readIndexOnce(path, expected);
+    last = result;
+    if (!raced) return result;
+    // A file the manifest named vanished. If the manifest has moved on, a newer
+    // generation was published meanwhile: follow it. Otherwise it is real damage.
+    const current = await readFile(path, "utf8").catch(() => undefined);
+    if (current === undefined || current === manifestText) return result;
+  }
+  return last;
+}
+
+async function readIndexOnce(
+  path: string,
+  expected: IndexExpectation,
+): Promise<{
+  result: IndexLoadResult;
+  manifestText?: string;
+  raced?: boolean;
+}> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return { status: "missing" };
+      return { result: { status: "missing" } };
     return {
-      status: "corrupt",
-      reason: `index file is unreadable (${(error as NodeJS.ErrnoException).code ?? "unknown error"})`,
+      result: {
+        status: "corrupt",
+        reason: `index file is unreadable (${(error as NodeJS.ErrnoException).code ?? "unknown error"})`,
+      },
     };
   }
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return { status: "corrupt", reason: "index file is not valid JSON" };
+    return {
+      result: { status: "corrupt", reason: "index file is not valid JSON" },
+    };
   }
   const version = (raw as { schemaVersion?: unknown } | null)?.schemaVersion;
+  if (version === 1)
+    return {
+      result: {
+        status: "incompatible",
+        reason: `schema version 1 != ${INDEX_SCHEMA_VERSION}`,
+        salvagedVectors: salvageSchemaV1Vectors(raw),
+      },
+    };
+  if (version === 2) {
+    const migrated = migrateSchemaV2(raw);
+    if (!migrated.ok)
+      return { result: { status: "corrupt", reason: migrated.reason } };
+    const compatibility = assessIndexCompatibility(migrated.value, expected);
+    if (compatibility.kind === "incompatible")
+      return {
+        result: { status: "incompatible", reason: compatibility.reason },
+      };
+    return {
+      result:
+        expected.revision !== undefined &&
+        migrated.value.revision !== expected.revision
+          ? { status: "stale", reason: "revision differs" }
+          : { status: "valid", index: migrated.value, migratedFromSchema: 2 },
+    };
+  }
   if (Number.isInteger(version) && version !== INDEX_SCHEMA_VERSION)
     return {
-      status: "incompatible",
-      reason: `schema version ${String(version)} != ${INDEX_SCHEMA_VERSION}`,
-      ...(version === 1
-        ? { salvagedVectors: salvageSchemaV1Vectors(raw) }
-        : {}),
+      result: {
+        status: "incompatible",
+        reason: `schema version ${String(version)} != ${INDEX_SCHEMA_VERSION}`,
+      },
     };
-  const parsed = parseRepositoryIndex(raw);
-  if (!parsed.ok) return { status: "corrupt", reason: parsed.reason };
-  const { index } = parsed;
-  const compatibility = assessIndexCompatibility(index, expected);
-  if (compatibility.kind === "incompatible")
-    return { status: "incompatible", reason: compatibility.reason };
-  return expected.revision !== undefined && index.revision !== expected.revision
-    ? { status: "stale", reason: "revision differs" }
-    : { status: "valid", index };
+  const manifest = parseManifest(raw);
+  if (!manifest.ok)
+    return { result: { status: "corrupt", reason: manifest.reason } };
+  const loaded = await readGeneration(path, manifest.value, {
+    accept: (metadata) => {
+      const compatibility = assessIndexCompatibility(metadata, expected);
+      if (compatibility.kind === "incompatible")
+        return { status: "incompatible", reason: compatibility.reason };
+      return expected.revision !== undefined &&
+        metadata.revision !== expected.revision
+        ? { status: "stale", reason: "revision differs" }
+        : undefined;
+    },
+  });
+  if (loaded.status === "valid")
+    return {
+      result: { status: "valid", index: loaded.index, info: loaded.info },
+    };
+  if (loaded.status === "corrupt")
+    return {
+      result: { status: "corrupt", reason: loaded.reason },
+      manifestText: text,
+      raced: loaded.fileMissing === true,
+    };
+  return { result: loaded };
 }
 
 async function runGit(
@@ -212,6 +327,10 @@ export type RepositoryIndexInput = {
   checkpointEveryBatches?: number;
   /** Counters and reasons about checkpoint use; never vectors or text. */
   onCheckpoint?: (event: CheckpointEvent) => void;
+  /** Sizes, counts and reasons about loading, migrating and publishing; never vectors or text. */
+  onStoreEvent?: (event: IndexStoreEvent) => void;
+  /** Test seam: every filesystem effect of publication. */
+  fileOps?: GenerationFileOps;
   /**
    * Working-tree files whose size and mtime match the previous index are
    * assumed unchanged without being read (Git's own model, with recent mtimes
@@ -296,15 +415,23 @@ async function scanSourceFiles(
 
 /**
  * Load, reconcile and atomically persist the repository index. The next index
- * is built and validated entirely in memory; the file is replaced only after
- * that succeeds, so a failure (provider error, cancellation, exhausted request
- * budget) leaves the previous complete index untouched.
+ * is built and validated entirely in memory and published as a new generation
+ * (see index-generation.ts); the manifest is replaced only after that
+ * succeeds, so a failure (provider error, cancellation, exhausted request
+ * budget, write error) leaves the previous complete index untouched.
+ *
+ * A schema-2 index (vectors as JSON) is upgraded here without any provider
+ * call: it is loaded into the packed form, reconciled like any other previous
+ * index, and written as a schema-3 generation whose manifest replaces the old
+ * file last. If anything fails before that, the schema-2 file is still the
+ * canonical index.
  */
 export async function refreshRepositoryIndex(
   input: RepositoryIndexInput,
 ): Promise<RepositoryIndexRefresh> {
   input.signal?.throwIfAborted();
   const path = indexPath(input.root, input.cacheDirName);
+  const loadStarted = performance.now();
   const loaded = await readIndex(path, {
     chunkerVersion: CHUNKER_VERSION,
     maxChunkTokens: input.maxChunkTokens,
@@ -324,6 +451,25 @@ export async function refreshRepositoryIndex(
           : ""
       }`,
     );
+  }
+  const migratedFrom =
+    loaded.status === "valid" ? loaded.migratedFromSchema : undefined;
+  if (loaded.status === "valid") {
+    if (loaded.info)
+      input.onStoreEvent?.({
+        type: "loaded",
+        vectors: loaded.info.vectorCount,
+        vectorBytes: loaded.info.vectorBytes,
+        metadataBytes: loaded.info.metadataBytes,
+        zeroCopy: loaded.info.zeroCopy,
+        durationMs: performance.now() - loadStarted,
+      });
+    if (migratedFrom !== undefined)
+      input.onStoreEvent?.({
+        type: "migration_started",
+        fromSchemaVersion: migratedFrom,
+        vectors: loaded.index.vectors.count,
+      });
   }
   const files = await scanSourceFiles(input);
   // Checkpoints are only read when this run may embed: an unauthorized or dry
@@ -350,34 +496,78 @@ export async function refreshRepositoryIndex(
       input.onCheckpoint?.({ type: "discarded", reason: stored.reason });
     }
   }
-  const { index, stats } = await updateRepositoryIndex({
-    previous: loaded.status === "valid" ? loaded.index : undefined,
-    repositoryId: input.repositoryId,
-    revision: input.revision,
-    maxChunkTokens: input.maxChunkTokens,
-    files,
-    embedding: input.embedding,
-    signal: input.signal,
-    beforeEmbeddingRequest: input.beforeEmbeddingRequest,
-    onEmbeddingRequest: input.onEmbeddingRequest,
-    maxEmbeddingBatchSize: input.maxEmbeddingBatchSize,
-    seedVectors,
-    checkpoint,
-    checkpointEveryBatches: input.checkpointEveryBatches,
-    onCheckpoint: input.onCheckpoint,
-    chunk: input.chunk,
-  });
+  const previous = loaded.status === "valid" ? loaded.index : undefined;
+  const failMigration = (error: unknown) => {
+    if (migratedFrom !== undefined)
+      input.onStoreEvent?.({
+        type: "migration_failed",
+        fromSchemaVersion: migratedFrom,
+        reason:
+          (error as NodeJS.ErrnoException)?.code ??
+          (error as Error)?.name ??
+          "unknown error",
+      });
+  };
+  let result: Awaited<ReturnType<typeof updateRepositoryIndex>>;
   try {
-    await writeFileAtomic(path, JSON.stringify(index));
+    result = await updateRepositoryIndex({
+      previous,
+      repositoryId: input.repositoryId,
+      revision: input.revision,
+      maxChunkTokens: input.maxChunkTokens,
+      files,
+      embedding: input.embedding,
+      signal: input.signal,
+      beforeEmbeddingRequest: input.beforeEmbeddingRequest,
+      onEmbeddingRequest: input.onEmbeddingRequest,
+      maxEmbeddingBatchSize: input.maxEmbeddingBatchSize,
+      seedVectors,
+      checkpoint,
+      checkpointEveryBatches: input.checkpointEveryBatches,
+      onCheckpoint: input.onCheckpoint,
+      chunk: input.chunk,
+    });
   } catch (error) {
+    failMigration(error);
+    throw error;
+  }
+  const { index, stats } = result;
+  const publishStarted = performance.now();
+  try {
+    const published = await publishIndex({
+      manifestPath: path,
+      index,
+      previous: previous ? persistedRefsOf(previous) : undefined,
+      ops: input.fileOps,
+    });
+    const durationMs = performance.now() - publishStarted;
+    input.onStoreEvent?.({
+      type: "published",
+      generation: published.generation,
+      vectors: published.vectorCount,
+      vectorBytes: published.vectorBytes,
+      metadataBytes: published.metadataBytes,
+      vectorBlobReused: published.vectorBlobReused,
+      durationMs,
+    });
+    if (published.cleanup.removed > 0 || published.cleanup.failed > 0)
+      input.onStoreEvent?.({ type: "cleanup", ...published.cleanup });
+    if (migratedFrom !== undefined)
+      input.onStoreEvent?.({
+        type: "migration_completed",
+        fromSchemaVersion: migratedFrom,
+        vectors: published.vectorCount,
+        vectorBytes: published.vectorBytes,
+        durationMs: performance.now() - loadStarted,
+      });
+  } catch (error) {
+    failMigration(error);
     // Everything was embedded but could not be published: keep the paid vectors.
     if (checkpoint) {
-      const known = new Set(
-        loaded.status === "valid" ? Object.keys(loaded.index.vectors) : [],
-      );
-      const fresh = Object.values(index.vectors).filter(
-        (vector) => !known.has(vector.cacheKey),
-      );
+      const fresh: StoredVector[] = [];
+      for (const ref of index.vectors.refs())
+        if (!previous?.vectors.has(ref.segment.cacheKeys[ref.row]!))
+          fresh.push(materializeVector(ref, index));
       if (fresh.length > 0)
         await checkpoint.save(fresh).then(
           () => input.onCheckpoint?.({ type: "saved", vectors: fresh.length }),

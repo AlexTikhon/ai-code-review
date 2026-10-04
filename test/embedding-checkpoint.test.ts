@@ -22,6 +22,7 @@ import {
   testConfig,
 } from "./fixtures.js";
 import { unitTest } from "./helpers.js";
+import { storedVector, storedVectors } from "./index-fixtures.js";
 import {
   indexOptions,
   probedEmbedding,
@@ -121,7 +122,7 @@ unitTest(
     assert.equal(resumed.state.requests, 14);
     assert.equal(reserved, 14, "checkpointed vectors consume no budget");
     assert.equal(result.stats.embeddingRequestsAvoided, 6);
-    assert.equal(Object.keys(result.index.vectors).length, 96);
+    assert.equal(result.index.vectors.count, 96);
     assert.equal(
       await exists(checkpoint),
       false,
@@ -138,11 +139,14 @@ unitTest(
       }),
     );
     assert.deepEqual(
-      Object.keys(result.index.vectors).sort(),
-      Object.keys(direct.index.vectors).sort(),
+      result.index.vectors.keys().sort(),
+      direct.index.vectors.keys().sort(),
     );
-    for (const [key, vector] of Object.entries(direct.index.vectors))
-      assert.deepEqual(result.index.vectors[key]!.values, vector.values);
+    for (const vector of storedVectors(direct.index))
+      assert.deepEqual(
+        storedVector(result.index, vector.cacheKey).values,
+        vector.values,
+      );
   },
 );
 
@@ -218,7 +222,7 @@ unitTest(
     assert.equal(reserved, 0);
     assert.equal(result.stats.vectorsFromCheckpoint, 96);
     assert.equal(await exists(checkpoint), false);
-    assert.equal(Object.keys(result.index.vectors).length, 96);
+    assert.equal(result.index.vectors.count, 96);
   },
 );
 
@@ -304,7 +308,7 @@ unitTest(
         onCheckpoint: (event) => events.push(event),
       }),
     );
-    assert.equal(Object.keys(result.index.vectors).length, 96);
+    assert.equal(result.index.vectors.count, 96);
     assert.ok(result.stats.checkpointSaveFailures > 0);
     assert.ok(events.some((event) => event.type === "save_failed"));
     assert.equal(await exists(canonical), true);
@@ -368,7 +372,7 @@ unitTest(
     );
     assert.equal(embedding.state.requests, 0);
     assert.equal(result.stats.vectorsFromCheckpoint, 0);
-    const published = new Set(Object.keys(result.index.vectors));
+    const published = new Set(result.index.vectors.keys());
     for (const vector of saved)
       assert.ok(!published.has(vector.cacheKey), "stale vector leaked");
     assert.equal(published.size, 16);

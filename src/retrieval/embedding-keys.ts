@@ -2,6 +2,13 @@ import { createHash } from "node:crypto";
 import type { EmbeddingAdapter } from "./embeddings.js";
 import { CHUNKER_VERSION, type ContextChunk } from "./types.js";
 
+/**
+ * Identifies how embeddingInputHash is derived (the input text and the
+ * algorithm). Persisted with the per-chunk hashes; if either ever changes, this
+ * must change with it so stored hashes are not trusted under a new definition.
+ */
+export const EMBEDDING_INPUT_HASH_VERSION = "sha256-path-signature-content-v1";
+
 export function normalizedEmbeddingInput(chunk: ContextChunk): string {
   return `${chunk.path.replaceAll("\\", "/")}\n${chunk.signature ?? ""}\n${chunk.content.replace(/\r\n/g, "\n")}`;
 }

@@ -19,7 +19,10 @@ export type IndexCompatibility =
  * individually, and vectors are matched by their own embedding identity.
  */
 export function assessIndexCompatibility(
-  index: RepositoryIndex,
+  index: Pick<
+    RepositoryIndex,
+    "chunkerVersion" | "maxChunkTokens" | "policyVersion" | "repositoryId"
+  >,
   required: IndexRequirements,
 ): IndexCompatibility {
   if (

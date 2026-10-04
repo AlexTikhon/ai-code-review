@@ -22,6 +22,7 @@ import {
   type ContextChunk,
   type RepositoryIndex,
 } from "../retrieval/types.js";
+import { vectorStoreFromStored } from "../retrieval/vector-store.js";
 import { median, prng } from "./util.js";
 
 /** text-embedding-3-small, the default OpenAI embedding model. */
@@ -214,7 +215,7 @@ function scorerComparison(): void {
   );
   console.log(work.join("\n"));
   console.log(
-    "\nOne-time preparation and memory (the unpacked number[][] stays resident in the loaded RepositoryIndex):",
+    "\nOne-time preparation and memory (the loaded index holds only the packed array; 'unpacked' is what a number[][] copy would cost on top):",
   );
   console.log(
     [
@@ -269,22 +270,20 @@ async function retrievalContextBenchmark(): Promise<void> {
       createdAt: "now",
       files: [],
       chunks,
-      vectors: Object.fromEntries(
-        chunks.map((chunk, id) => [
-          `k${id}`,
-          {
-            cacheKey: `k${id}`,
-            values: rows[id]!,
-            inputHash: embeddingInputHash(chunk),
-            dimensions: DIMENSIONS,
-            provider: "bench",
-            model: "m",
-            version: "v",
-            dimensionIdentity: String(DIMENSIONS),
-            chunkerVersion: CHUNKER_VERSION,
-            maxChunkTokens: 200,
-          },
-        ]),
+      inputHashes: chunks.map(embeddingInputHash),
+      vectors: vectorStoreFromStored(
+        chunks.map((chunk, id) => ({
+          cacheKey: `k${id}`,
+          values: rows[id]!,
+          inputHash: embeddingInputHash(chunk),
+          dimensions: DIMENSIONS,
+          provider: "bench",
+          model: "m",
+          version: "v",
+          dimensionIdentity: String(DIMENSIONS),
+          chunkerVersion: CHUNKER_VERSION,
+          maxChunkTokens: 200,
+        })),
       ),
     };
     const prepared = prepareRepositoryIndex(index);

@@ -26,6 +26,7 @@
     "eval": "tsx src/eval/run.ts",
     "eval:live": "tsx src/eval/live.ts",
     "bench": "tsx src/bench/retrieval.ts",
+    "bench:persistence": "tsx src/bench/persistence.ts",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"docs/**/*.md\" \"eval/**/*.json\" \".github/**/*.yml\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"*.json\" \"*.md\" \"docs/**/*.md\" \"eval/**/*.json\" \".github/**/*.yml\"",
     "prepack": "npm run build",

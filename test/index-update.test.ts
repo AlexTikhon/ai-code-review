@@ -8,13 +8,14 @@ import {
   type SourceFileRef,
 } from "../src/retrieval/index-update.js";
 import { embeddingInputHash } from "../src/retrieval/embedding-keys.js";
-import { parseRepositoryIndex } from "../src/retrieval/index-schema.js";
+import { validateRepositoryIndex } from "../src/retrieval/index-schema.js";
 import {
   CHUNKER_VERSION,
   type RepositoryIndex,
 } from "../src/retrieval/types.js";
 import { POLICY_VERSION } from "../src/review/types.js";
 import { unitTest } from "./helpers.js";
+import { storedVectors } from "./index-fixtures.js";
 
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -115,15 +116,16 @@ function seeded(count = 6): Harness {
 const uniqueInputs = (index: RepositoryIndex) =>
   new Set(index.chunks.map(embeddingInputHash)).size;
 
-const vectorCount = (index: RepositoryIndex) =>
-  Object.keys(index.vectors).length;
+const vectorCount = (index: RepositoryIndex) => index.vectors.count;
 
 /** Everything that must match between an incremental and a from-scratch index. */
 function comparable(index: RepositoryIndex) {
   return {
     ...index,
     createdAt: "",
-    vectors: Object.fromEntries(Object.entries(index.vectors).sort()),
+    vectors: storedVectors(index).sort((a, b) =>
+      a.cacheKey.localeCompare(b.cacheKey),
+    ),
   };
 }
 
@@ -142,8 +144,8 @@ unitTest("first update reads, chunks and embeds every file once", async () => {
   assert.equal(stats.vectorsCreated, vectorCount(index));
   assert.equal(harness.embeddedTexts, stats.vectorsCreated);
   assert.equal(stats.previous, "none");
-  assert.ok(parseRepositoryIndex(JSON.parse(JSON.stringify(index))).ok);
-  assert.equal(index.schemaVersion, 2);
+  assert.equal(validateRepositoryIndex(index), undefined);
+  assert.equal(index.schemaVersion, 3);
   assert.equal(index.policyVersion, POLICY_VERSION);
   assert.deepEqual(
     index.files.map((file) => file.path),
@@ -258,10 +260,7 @@ unitTest("a deleted file leaves no chunks, vectors or metadata", async () => {
   assert.equal(second.stats.filesDeleted, 1);
   assert.ok(second.index.chunks.every((chunk) => chunk.path !== "src/f2.ts"));
   assert.ok(second.index.files.every((file) => file.path !== "src/f2.ts"));
-  assert.equal(
-    Object.keys(second.index.vectors).length,
-    uniqueInputs(second.index),
-  );
+  assert.equal(second.index.vectors.count, uniqueInputs(second.index));
   assert.ok(second.stats.vectorsPruned > 0);
   assert.equal(second.stats.vectorsCreated, 0);
   assert.deepEqual(
@@ -360,7 +359,7 @@ unitTest(
     assert.equal(harness.embeddedTexts, vectorCount(first.index));
     assert.equal(changed.stats.filesReused, 4, "chunks stay reusable");
     const models = new Set(
-      Object.values(changed.index.vectors).map((vector) => vector.model),
+      storedVectors(changed.index).map((vector) => vector.model),
     );
     assert.ok(models.has("another-model"));
 

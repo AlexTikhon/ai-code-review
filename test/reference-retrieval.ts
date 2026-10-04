@@ -1,5 +1,6 @@
 import { DeterministicTestEmbedding } from "../src/retrieval/embeddings.js";
 import { embeddingInputHash } from "../src/retrieval/index-store.js";
+import { storedVectors } from "./index-fixtures.js";
 import type {
   ContextChunk,
   RepositoryIndex,
@@ -70,9 +71,10 @@ export async function referenceRetrieve(
   const semantic: RetrievalCandidate[] = [];
   if (mode === "hybrid") {
     const queryVector = (await embedding.embed([query]))[0]!;
+    const all = storedVectors(index);
     for (const chunk of index.chunks) {
       const hash = embeddingInputHash(chunk);
-      const stored = Object.values(index.vectors).find(
+      const stored = all.find(
         (vector: StoredVector) =>
           vector.inputHash === hash &&
           vector.provider === embedding.provider &&

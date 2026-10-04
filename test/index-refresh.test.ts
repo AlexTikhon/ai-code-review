@@ -36,6 +36,11 @@ import {
   testConfig,
 } from "./fixtures.js";
 import { unitTest } from "./helpers.js";
+import {
+  activeMetadataPath,
+  rewriteMetadata,
+  snapshotFiles,
+} from "./index-fixtures.js";
 
 const run = promisify(execFile);
 const delegate = new DeterministicTestEmbedding();
@@ -306,7 +311,7 @@ unitTest(
     const { adapter, state } = countingEmbedding();
     await refreshRepositoryIndex(await options(root, { embedding: adapter }));
     const path = indexPath(root, ".cache");
-    const before = await readFile(path, "utf8");
+    const before = await snapshotFiles(join(root, ".cache"));
     await put(root, "src/m2.ts", "export function work2() { return 222; }\n");
     state.fail = true;
     await assert.rejects(
@@ -318,10 +323,9 @@ unitTest(
       ),
       /provider down/,
     );
-    assert.equal(await readFile(path, "utf8"), before);
-    assert.deepEqual(await readdir(join(root, ".cache")), [
-      "repository-index.json",
-    ]);
+    // Manifest, metadata and vector blob: not one byte differs, nothing is added.
+    assert.deepEqual(await snapshotFiles(join(root, ".cache")), before);
+    assert.equal(path, indexPath(root, ".cache"));
     // Recovery: the next successful run builds on the intact previous index.
     state.fail = false;
     const recovered = await refreshRepositoryIndex(
@@ -398,27 +402,27 @@ unitTest(
     const messages: string[] = [];
     const first = await refreshRepositoryIndex(await options(root));
     const path = indexPath(root, ".cache");
-    const stored = JSON.parse(await readFile(path, "utf8"));
-    const cases: Array<[string, string, RegExp]> = [
-      ["corrupt", "{ truncated", /unusable/],
+    // Each case damages whatever valid index the previous step left behind.
+    const cases: Array<[string, () => Promise<void>, RegExp]> = [
+      ["corrupt", () => writeFile(path, "{ truncated"), /unusable/],
       [
         "incompatible",
-        JSON.stringify({ ...stored, schemaVersion: 1 }),
+        () => writeFile(path, JSON.stringify({ schemaVersion: 1 })),
         /incompatible \(schema version 1/,
       ],
       [
         "incompatible",
-        JSON.stringify({ ...stored, policyVersion: "0.0.1" }),
+        () => rewriteMetadata(path, (d) => (d.policyVersion = "0.0.1")),
         /incompatible \(privacy policy version/,
       ],
       [
         "corrupt",
-        JSON.stringify({ ...stored, files: [] }),
+        () => rewriteMetadata(path, (d) => (d.files = [])),
         /unusable \(files: chunks and file entries disagree\)/,
       ],
     ];
-    for (const [status, contents, pattern] of cases) {
-      await writeFile(path, contents);
+    for (const [status, damage, pattern] of cases) {
+      await damage();
       messages.length = 0;
       const result = await refreshRepositoryIndex(
         await options(root, { onDiagnostic: (m) => messages.push(m) }),
@@ -463,9 +467,14 @@ unitTest(
       index.files.map((file) => file.path),
       ["ok.ts"],
     );
-    const text = await readFile(indexPath(root, ".cache"), "utf8");
+    const manifestPath = indexPath(root, ".cache");
+    const text = await readFile(await activeMetadataPath(manifestPath), "utf8");
     assert.ok(!text.includes("ghp_abcdefghijklmnop"));
-    assert.deepEqual(JSON.parse(text), JSON.parse(JSON.stringify(index)));
+    const metadata = JSON.parse(text);
+    const plain = JSON.parse(JSON.stringify(index));
+    assert.deepEqual(metadata.chunks, plain.chunks);
+    assert.deepEqual(metadata.files, plain.files);
+    assert.deepEqual(metadata.chunkInputHashes, plain.inputHashes);
   },
 );
 
@@ -552,9 +561,6 @@ unitTest(
     assert.match(result.context.message ?? "", /not permitted/);
     const index = await readIndex(indexPath(root, ".cache"));
     assert.equal(index.status, "valid");
-    assert.equal(
-      index.status === "valid" && Object.keys(index.index.vectors).length,
-      0,
-    );
+    assert.equal(index.status === "valid" && index.index.vectors.count, 0);
   },
 );

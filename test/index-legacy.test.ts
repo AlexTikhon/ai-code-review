@@ -7,6 +7,7 @@ import {
 } from "../src/retrieval/index-store.js";
 import { salvageSchemaV1Vectors } from "../src/retrieval/index-legacy.js";
 import { unitTest } from "./helpers.js";
+import { activeMetadataPath, schema2Document } from "./index-fixtures.js";
 import {
   indexOptions,
   probedEmbedding,
@@ -26,14 +27,18 @@ async function legacyFixture(fileCount = 6) {
   const built = await refreshRepositoryIndex(
     await indexOptions(root, { embedding: first.adapter }),
   );
-  const { files: _files, policyVersion: _policy, ...rest } = built.index;
+  const {
+    files: _files,
+    policyVersion: _policy,
+    ...rest
+  } = schema2Document(built.index);
   const legacy = { ...rest, schemaVersion: 1 };
   await writeFile(path, JSON.stringify(legacy));
   return {
     root,
     path,
     legacy,
-    vectorCount: Object.keys(built.index.vectors).length,
+    vectorCount: built.index.vectors.count,
   };
 }
 
@@ -72,17 +77,19 @@ unitTest(
       "paid vectors are not paid for twice",
     );
     assert.equal(result.stats.vectorsFromCheckpoint, vectorCount);
-    assert.equal(Object.keys(result.index.vectors).length, vectorCount);
+    assert.equal(result.index.vectors.count, vectorCount);
     assert.ok(
       diagnostics.some((m) => /schema version 1/.test(m) && /salvaged/.test(m)),
     );
     // The file on disk is now a valid current-schema index.
-    const after = JSON.parse(await readFile(path, "utf8")) as {
+    const after = JSON.parse(
+      await readFile(await activeMetadataPath(path), "utf8"),
+    ) as {
       schemaVersion: number;
       files: unknown[];
       policyVersion: string;
     };
-    assert.equal(after.schemaVersion, 2);
+    assert.equal(after.schemaVersion, 3);
     assert.equal(after.files.length, 6);
     assert.ok(after.policyVersion);
     assert.equal((await readIndex(path)).status, "valid");
@@ -169,6 +176,6 @@ unitTest("an unauthorized run salvages and spends nothing", async () => {
   const { root, path } = await legacyFixture();
   const result = await refreshRepositoryIndex(await indexOptions(root));
   assert.equal(result.stats.embeddingRequests, 0);
-  assert.equal(Object.keys(result.index.vectors).length, 0);
+  assert.equal(result.index.vectors.count, 0);
   assert.equal((await readIndex(path)).status, "valid");
 });

@@ -10,7 +10,7 @@ import {
 import type { CheckpointEvent } from "./embedding-checkpoint.js";
 import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
 import { assessIndexCompatibility } from "./index-compat.js";
-import { parseRepositoryIndex } from "./index-schema.js";
+import { validateRepositoryIndex } from "./index-schema.js";
 import {
   CHUNKER_VERSION,
   INDEX_SCHEMA_VERSION,
@@ -19,6 +19,13 @@ import {
   type RepositoryIndex,
   type StoredVector,
 } from "./types.js";
+import {
+  VectorStore,
+  VectorStoreBuilder,
+  refCacheKey,
+  refInputHash,
+  type VectorRef,
+} from "./vector-store.js";
 
 /**
  * A file mtime this close to "now" could still be rewritten within the same
@@ -112,6 +119,7 @@ export type IndexUpdateInput = {
 const sha256 = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 
+/** A checkpointed or salvaged vector: untrusted JSON, so every field is re-checked. */
 function validStoredVector(
   vector: StoredVector,
   inputHashes: ReadonlySet<string>,
@@ -173,7 +181,9 @@ export async function updateRepositoryIndex(
   const previous =
     compatibility?.kind === "reusable" ? input.previous : undefined;
   const previousFiles = new Map(previous?.files.map((f) => [f.path, f]));
-  const previousChunks = new Map(previous?.chunks.map((c) => [c.id, c]));
+  const previousChunkPosition = new Map(
+    previous?.chunks.map((chunk, position) => [chunk.id, position]),
+  );
   const stats: IndexUpdateStats = {
     previous: !input.previous ? "none" : previous ? "reused" : "incompatible",
     filesTotal: 0,
@@ -198,6 +208,8 @@ export async function updateRepositoryIndex(
 
   const files: IndexedFile[] = [];
   const chunks: ContextChunk[] = [];
+  /** Embedding input hash of chunks[i]; reused chunks bring theirs along. */
+  const inputHashes: string[] = [];
   const seen = new Set<string>();
   const recordableMtime = (ref: SourceFileRef) =>
     ref.mtimeMs !== undefined && ref.mtimeMs < now() - RACY_WINDOW_MS
@@ -217,33 +229,42 @@ export async function updateRepositoryIndex(
     ...(fields.mtimeMs !== undefined ? { mtimeMs: fields.mtimeMs } : {}),
     chunkIds: fields.chunkIds,
   });
-  /** Previous chunks of a file under the new revision, or undefined if any is missing. */
-  const reusableChunks = (file: IndexedFile): ContextChunk[] | undefined => {
+  /**
+   * Previous chunks of a file under the new revision, with their stored input
+   * hashes, or undefined if any is missing. Rebinding changes only the revision
+   * and id, never the path, signature or content the hash covers.
+   */
+  const reusableChunks = (
+    file: IndexedFile,
+  ): { chunks: ContextChunk[]; hashes: string[] } | undefined => {
     const found: ContextChunk[] = [];
+    const hashes: string[] = [];
     for (const id of file.chunkIds) {
-      const chunk = previousChunks.get(id);
-      if (!chunk) return undefined;
-      found.push(rebindChunk(chunk, revision));
+      const position = previousChunkPosition.get(id);
+      if (position === undefined) return undefined;
+      found.push(rebindChunk(previous!.chunks[position]!, revision));
+      hashes.push(previous!.inputHashes[position]!);
     }
-    return found;
+    return { chunks: found, hashes };
   };
   const carryOver = (
     file: IndexedFile,
-    reused: ContextChunk[],
+    reused: { chunks: ContextChunk[]; hashes: string[] },
     extra: { blobId?: string; mtimeMs?: number; size?: number },
   ) => {
-    chunks.push(...reused);
+    chunks.push(...reused.chunks);
+    inputHashes.push(...reused.hashes);
     files.push(
       entry(file.path, {
         contentHash: file.contentHash,
         size: extra.size ?? file.size,
         blobId: extra.blobId ?? file.blobId,
         mtimeMs: extra.mtimeMs ?? file.mtimeMs,
-        chunkIds: reused.map((chunk) => chunk.id),
+        chunkIds: reused.chunks.map((chunk) => chunk.id),
       }),
     );
     stats.filesReused++;
-    stats.chunksReused += reused.length;
+    stats.chunksReused += reused.chunks.length;
   };
 
   for (const ref of input.files) {
@@ -305,6 +326,7 @@ export async function updateRepositoryIndex(
       continue;
     }
     chunks.push(...created);
+    inputHashes.push(...created.map(embeddingInputHash));
     stats.chunksCreated += created.length;
     stats.filesIndexed++;
     if (prior) stats.filesModified++;
@@ -315,26 +337,57 @@ export async function updateRepositoryIndex(
   for (const path of previousFiles.keys())
     if (!kept.has(path)) stats.filesDeleted++;
 
-  const inputHashes = chunks.map(embeddingInputHash);
   const wanted = new Set(inputHashes);
-  const retained: Record<string, StoredVector> = {};
-  for (const [key, vector] of Object.entries(previous?.vectors ?? {}))
-    if (validStoredVector(vector, wanted, maxChunkTokens))
-      retained[key] = vector;
+  const previousVectors = previous?.vectors ?? VectorStore.empty();
+  /** Previous vectors some chunk still needs, in persisted order. */
+  const retained: VectorRef[] = [];
+  for (const ref of previousVectors.refs())
+    if (wanted.has(refInputHash(ref))) retained.push(ref);
 
-  const vectors: Record<string, StoredVector> = {};
+  // Rows are copied typed-array to typed-array from the previous store: no
+  // reused vector is ever turned into a number[].
+  const builder = new VectorStoreBuilder();
+  let keptFromPrevious = 0;
+  const addPrevious = (ref: VectorRef) => {
+    const { segment, row } = ref;
+    if (
+      builder.add(
+        segment.space,
+        refCacheKey(ref),
+        refInputHash(ref),
+        segment.vectors,
+        row * segment.space.dimensions,
+      )
+    )
+      keptFromPrevious++;
+  };
   if (embedding) {
     const identity = embeddingDimensionIdentity(embedding);
-    const sameSpace = (vector: StoredVector) =>
+    const sameSpace = (vector: {
+      provider: string;
+      model: string;
+      version: string;
+      dimensionIdentity: string;
+    }) =>
       vector.provider === embedding.provider &&
       vector.model === embedding.model &&
       vector.version === embedding.version &&
       vector.dimensionIdentity === identity;
+    const activeByHash = new Map<string, VectorRef>();
+    for (const ref of retained)
+      if (sameSpace(ref.segment.space))
+        activeByHash.set(refInputHash(ref), ref);
     const seeded = new Map<string, StoredVector>();
     for (const vector of input.seedVectors ?? [])
       if (validStoredVector(vector, wanted, maxChunkTokens))
         seeded.set(vector.cacheKey, vector);
-    const seenKeys = new Set<string>();
+    // One entry per distinct embedding input, in first-occurrence chunk order.
+    const resolved: Array<{
+      inputHash: string;
+      ref?: VectorRef;
+      cacheKey?: string;
+    }> = [];
+    const seenHashes = new Set<string>();
     const missing = new Map<
       string,
       { chunk: ContextChunk; inputHash: string }
@@ -342,24 +395,26 @@ export async function updateRepositoryIndex(
     const fromCheckpoint = new Map<string, StoredVector>();
     chunks.forEach((chunk, position) => {
       const inputHash = inputHashes[position]!;
+      if (seenHashes.has(inputHash)) return;
+      seenHashes.add(inputHash);
+      const stored = activeByHash.get(inputHash);
+      if (stored) {
+        stats.vectorsReused++;
+        resolved.push({ inputHash, ref: stored });
+        return;
+      }
+      // Only a vector that has to be created or checkpoint-matched needs its
+      // cache key derived; a stored one carries its own.
       const cacheKey = embeddingCacheKeyForHash(
         inputHash,
         embedding,
         maxChunkTokens,
       );
-      if (seenKeys.has(cacheKey)) return;
-      seenKeys.add(cacheKey);
-      const cached = retained[cacheKey];
       const checkpointed = seeded.get(cacheKey);
-      if (cached && sameSpace(cached)) {
-        stats.vectorsReused++;
-      } else if (checkpointed && sameSpace(checkpointed)) {
-        delete retained[cacheKey];
+      if (checkpointed && sameSpace(checkpointed))
         fromCheckpoint.set(cacheKey, checkpointed);
-      } else {
-        delete retained[cacheKey];
-        missing.set(cacheKey, { chunk, inputHash });
-      }
+      else missing.set(cacheKey, { chunk, inputHash });
+      resolved.push({ inputHash, cacheKey });
     });
     const pending = [...missing.entries()];
     const batchSize = Math.max(1, input.maxEmbeddingBatchSize ?? 32);
@@ -440,25 +495,20 @@ export async function updateRepositoryIndex(
     }
     stats.vectorsCreated = created.size;
     // Chunk order first, so the persisted record is independent of history.
-    for (const position of chunks.keys()) {
-      const cacheKey = embeddingCacheKeyForHash(
-        inputHashes[position]!,
-        embedding,
-        maxChunkTokens,
-      );
-      const vector =
-        created.get(cacheKey) ??
-        fromCheckpoint.get(cacheKey) ??
-        retained[cacheKey];
-      if (vector) vectors[cacheKey] = vector;
+    for (const { ref, cacheKey } of resolved) {
+      if (ref) addPrevious(ref);
+      else {
+        const vector = created.get(cacheKey!) ?? fromCheckpoint.get(cacheKey!);
+        if (vector) builder.addStored(vector);
+      }
     }
   }
   // Vectors of other embedding spaces for chunks that still exist stay put.
-  for (const [key, vector] of Object.entries(retained))
-    if (!(key in vectors)) vectors[key] = vector;
-  stats.vectorsPruned = Object.keys(previous?.vectors ?? {}).filter(
-    (key) => !(key in vectors),
-  ).length;
+  for (const ref of retained)
+    if (!builder.has(refCacheKey(ref))) addPrevious(ref);
+  stats.vectorsPruned = previousVectors.count - keptFromPrevious;
+  // Unchanged vectors keep the previous store (and so its persisted blob).
+  const vectors = builder.build(previousVectors);
 
   const next: RepositoryIndex = {
     schemaVersion: INDEX_SCHEMA_VERSION,
@@ -470,12 +520,11 @@ export async function updateRepositoryIndex(
     createdAt: new Date().toISOString(),
     files,
     chunks,
+    inputHashes,
     vectors,
   };
-  const validated = parseRepositoryIndex(next);
-  if (!validated.ok)
-    throw new Error(
-      `Refusing to use an invalid repository index (${validated.reason})`,
-    );
+  const problem = validateRepositoryIndex(next);
+  if (problem)
+    throw new Error(`Refusing to use an invalid repository index (${problem})`);
   return { index: next, stats };
 }
