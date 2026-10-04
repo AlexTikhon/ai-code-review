@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { INDEX_SCHEMA_VERSION } from "../src/retrieval/types.js";
+import { POLICY_VERSION } from "../src/review/types.js";
+import { filesForChunks } from "./index-fixtures.js";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -56,12 +59,14 @@ async function validIndex(): Promise<RepositoryIndex> {
     };
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: INDEX_SCHEMA_VERSION,
+    policyVersion: POLICY_VERSION,
     chunkerVersion: CHUNKER_VERSION,
     repositoryId: "repo",
     revision: "rev",
     maxChunkTokens: 100,
     createdAt: "now",
+    files: filesForChunks(chunks),
     chunks,
     vectors,
   };
@@ -93,7 +98,11 @@ unitTest(
     const index = await validIndex();
     const firstKey = Object.keys(index.vectors)[0]!;
     const cases: Array<[string, (draft: any) => void]> = [
-      ["schema version", (d) => (d.schemaVersion = 2)],
+      ["schema version", (d) => (d.schemaVersion = 99)],
+      ["policy version", (d) => delete d.policyVersion],
+      ["file entries", (d) => (d.files[0].chunkIds = ["missing"])],
+      ["duplicate file", (d) => d.files.push({ ...d.files[0] })],
+      ["unowned chunks", (d) => (d.files = [])],
       ["repository identity", (d) => delete d.repositoryId],
       ["revision", (d) => (d.revision = "")],
       ["chunker version", (d) => delete d.chunkerVersion],
@@ -126,7 +135,7 @@ unitTest(
 );
 
 unitTest(
-  "readIndex distinguishes missing, corrupt, stale and valid",
+  "readIndex distinguishes missing, corrupt, incompatible, stale and valid",
   async () => {
     const dir = await mkdtemp(join(tmpdir(), "acr-readindex-"));
     const path = indexPath(dir, ".cache");
@@ -134,7 +143,7 @@ unitTest(
 
     await writeIndexFile(dir, "{ not json");
     assert.equal((await readIndex(path)).status, "corrupt");
-    await writeIndexFile(dir, JSON.stringify({ schemaVersion: 1 }));
+    await writeIndexFile(dir, JSON.stringify({ schemaVersion: 2 }));
     assert.equal((await readIndex(path)).status, "corrupt");
 
     const index = await validIndex();
@@ -149,12 +158,27 @@ unitTest(
     for (const expectation of [
       { chunkerVersion: "ts-js-ast-v0" },
       { maxChunkTokens: 99 },
+      { policyVersion: "0.0.1" },
       { repositoryId: "other" },
-      { revision: "newer" },
     ]) {
-      const stale = await readIndex(path, expectation);
-      assert.equal(stale.status, "stale", JSON.stringify(expectation));
+      const incompatible = await readIndex(path, expectation);
+      assert.equal(
+        incompatible.status,
+        "incompatible",
+        JSON.stringify(expectation),
+      );
     }
+    // Compatible but built for another revision: stale, not incompatible.
+    assert.equal(
+      (await readIndex(path, { revision: "newer" })).status,
+      "stale",
+    );
+    // A well-formed index of another schema version is incompatible, not corrupt.
+    await writeIndexFile(
+      dir,
+      JSON.stringify({ ...clone(index), schemaVersion: 1 }),
+    );
+    assert.equal((await readIndex(path)).status, "incompatible");
   },
 );
 
@@ -186,7 +210,7 @@ unitTest(
   },
 );
 
-unitTest("a stale persisted index contributes no vectors", async () => {
+unitTest("an incompatible persisted index contributes no vectors", async () => {
   const root = await mkdtemp(join(tmpdir(), "acr-stale-index-"));
   await promisify(execFile)("git", ["init"], { cwd: root });
   await writeFile(join(root, "a.ts"), "export const a = 1;\n");
@@ -229,7 +253,7 @@ unitTest("a stale persisted index contributes no vectors", async () => {
     onDiagnostic: (message) => diagnostics.push(message),
   });
   assert.ok(embedded > first, "stale vectors must be recomputed");
-  assert.match(diagnostics.join(" "), /stale/);
+  assert.match(diagnostics.join(" "), /incompatible/);
 });
 
 async function validIndexFrom(path: string): Promise<RepositoryIndex> {

@@ -1,28 +1,40 @@
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { writeFileAtomic } from "../cache/atomic-write.js";
 import {
-  assertContainedRegularFile,
+  inspectContainedRegularFile,
   inspectSensitiveContent,
   isMandatorySensitivePath,
 } from "../privacy/policy.js";
 import { isIgnoredPath, type LoadedIgnore } from "../review/ignore.js";
+import { POLICY_VERSION } from "../review/types.js";
 import {
+  INDEX_SCHEMA_VERSION,
   CHUNKER_VERSION,
-  type ContextChunk,
   type RepositoryIndex,
-  type StoredVector,
 } from "./types.js";
-import { chunkSource } from "./chunker.js";
+import type { chunkSource } from "./chunker.js";
+import type { EmbeddingAdapter } from "./embeddings.js";
+import { assessIndexCompatibility } from "./index-compat.js";
 import { parseRepositoryIndex } from "./index-schema.js";
-import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
+import {
+  updateRepositoryIndex,
+  type IndexUpdateStats,
+  type SourceFileRef,
+} from "./index-update.js";
+
+export {
+  embeddingCacheKey,
+  embeddingInputHash,
+  normalizedEmbeddingInput,
+} from "./embedding-keys.js";
 
 const execFileAsync = promisify(execFile);
 const INDEXABLE =
   /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kt|swift|cs|cpp|cc|c|h|hpp|php)$/i;
+const MAX_FILE_BYTES = 1024 * 1024;
 
 export function indexPath(root: string, cacheDirName: string): string {
   return join(root, cacheDirName, "repository-index.json");
@@ -31,23 +43,28 @@ export function indexPath(root: string, cacheDirName: string): string {
 /**
  * Outcome of reading the persisted index. Nothing here is trusted until it has
  * passed the runtime schema:
- * - missing: no file; build from scratch.
- * - corrupt: unreadable, not JSON, or schema/consistency violation.
- * - stale:   structurally valid but built by an incompatible chunker/budget
- *            (or for a different repository/revision when the caller requires
- *            an exact match).
- * Corrupt and stale files are derived data, so callers rebuild from source and
- * report the reason instead of reusing anything from them.
+ * - missing:      no file; build from scratch.
+ * - corrupt:      unreadable, not JSON, or a schema/consistency violation.
+ * - incompatible: well-formed but made by a different schema, chunker, chunk
+ *                 budget, privacy policy or repository, so none of it is reused.
+ * - stale:        compatible, but built for a different revision than the
+ *                 caller required. Index refresh does not require one: a moved
+ *                 revision is the normal case and is reconciled file by file.
+ * - valid:        reusable.
+ * Derived data is never repaired; callers rebuild from source and report the
+ * reason instead.
  */
 export type IndexLoadResult =
   | { status: "missing" }
   | { status: "valid"; index: RepositoryIndex }
   | { status: "corrupt"; reason: string }
+  | { status: "incompatible"; reason: string }
   | { status: "stale"; reason: string };
 
 export type IndexExpectation = {
   chunkerVersion?: string;
   maxChunkTokens?: number;
+  policyVersion?: string;
   repositoryId?: string;
   revision?: string;
 };
@@ -73,56 +90,21 @@ export async function readIndex(
   } catch {
     return { status: "corrupt", reason: "index file is not valid JSON" };
   }
+  const version = (raw as { schemaVersion?: unknown } | null)?.schemaVersion;
+  if (Number.isInteger(version) && version !== INDEX_SCHEMA_VERSION)
+    return {
+      status: "incompatible",
+      reason: `schema version ${String(version)} != ${INDEX_SCHEMA_VERSION}`,
+    };
   const parsed = parseRepositoryIndex(raw);
   if (!parsed.ok) return { status: "corrupt", reason: parsed.reason };
   const { index } = parsed;
-  const mismatch =
-    expected.chunkerVersion !== undefined &&
-    index.chunkerVersion !== expected.chunkerVersion
-      ? `chunker version ${index.chunkerVersion} != ${expected.chunkerVersion}`
-      : expected.maxChunkTokens !== undefined &&
-          index.maxChunkTokens !== expected.maxChunkTokens
-        ? `max chunk tokens ${index.maxChunkTokens} != ${expected.maxChunkTokens}`
-        : expected.repositoryId !== undefined &&
-            index.repositoryId !== expected.repositoryId
-          ? "repository identity differs"
-          : expected.revision !== undefined &&
-              index.revision !== expected.revision
-            ? "revision differs"
-            : undefined;
-  return mismatch
-    ? { status: "stale", reason: mismatch }
+  const compatibility = assessIndexCompatibility(index, expected);
+  if (compatibility.kind === "incompatible")
+    return { status: "incompatible", reason: compatibility.reason };
+  return expected.revision !== undefined && index.revision !== expected.revision
+    ? { status: "stale", reason: "revision differs" }
     : { status: "valid", index };
-}
-
-export function normalizedEmbeddingInput(chunk: ContextChunk): string {
-  return `${chunk.path.replaceAll("\\", "/")}\n${chunk.signature ?? ""}\n${chunk.content.replace(/\r\n/g, "\n")}`;
-}
-
-export function embeddingInputHash(chunk: ContextChunk): string {
-  return createHash("sha256")
-    .update(normalizedEmbeddingInput(chunk))
-    .digest("hex");
-}
-
-export function embeddingCacheKey(
-  chunk: ContextChunk,
-  embedding: EmbeddingAdapter,
-  maxChunkTokens: number,
-): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        inputHash: embeddingInputHash(chunk),
-        provider: embedding.provider,
-        model: embedding.model,
-        version: embedding.version,
-        dimensions: embedding.dimensions ?? "provider-default",
-        chunkerVersion: CHUNKER_VERSION,
-        maxChunkTokens,
-      }),
-    )
-    .digest("hex");
 }
 
 async function runGit(
@@ -155,13 +137,18 @@ async function workingTreeNames(
     .filter(Boolean);
 }
 
-type IndexEntry = { name: string; size?: number; symlink?: boolean };
+type TreeEntry = {
+  name: string;
+  size?: number;
+  symlink?: boolean;
+  blobId?: string;
+};
 
 async function revisionEntries(
   root: string,
   revision: string,
   signal?: AbortSignal,
-): Promise<IndexEntry[]> {
+): Promise<TreeEntry[]> {
   const output = await runGit(
     root,
     ["ls-tree", "-r", "-z", "--long", revision],
@@ -171,37 +158,20 @@ async function revisionEntries(
     .split("\0")
     .filter(Boolean)
     .map((record) => {
-      const match = /^(\d+)\s+\w+\s+[a-f0-9]+\s+(-|\d+)\t([\s\S]+)$/.exec(
+      const match = /^(\d+)\s+\w+\s+([a-f0-9]+)\s+(-|\d+)\t([\s\S]+)$/.exec(
         record,
       );
       if (!match) throw new Error("Unable to parse git tree entry");
       return {
-        name: match[3]!,
-        size: match[2] === "-" ? undefined : Number(match[2]),
+        name: match[4]!,
+        blobId: match[2]!,
+        size: match[3] === "-" ? undefined : Number(match[3]),
         symlink: match[1] === "120000",
       };
     });
 }
 
-function validStoredVector(
-  vector: StoredVector,
-  inputHashes: Set<string>,
-  maxChunkTokens: number,
-): boolean {
-  return (
-    typeof vector.cacheKey === "string" &&
-    typeof vector.inputHash === "string" &&
-    inputHashes.has(vector.inputHash) &&
-    vector.chunkerVersion === CHUNKER_VERSION &&
-    vector.maxChunkTokens === maxChunkTokens &&
-    Number.isInteger(vector.dimensions) &&
-    vector.dimensions > 0 &&
-    vector.values.length === vector.dimensions &&
-    vector.values.every(Number.isFinite)
-  );
-}
-
-export async function buildRepositoryIndex(input: {
+export type RepositoryIndexInput = {
   root: string;
   repositoryId: string;
   revision: string;
@@ -217,141 +187,133 @@ export async function buildRepositoryIndex(input: {
   /** Receives a safe, value-free reason when a persisted index is discarded. */
   onDiagnostic?: (message: string) => void;
   maxEmbeddingBatchSize?: number;
-}): Promise<RepositoryIndex> {
+  /**
+   * Working-tree files whose size and mtime match the previous index are
+   * assumed unchanged without being read (Git's own model, with recent mtimes
+   * excluded). Set false to read and hash every file: slower, but then identity
+   * never depends on timestamps. Revision (PR) indexes use Git blob ids instead.
+   */
+  trustFileStat?: boolean;
+  /** Test seam: replaces the chunker. */
+  chunk?: typeof chunkSource;
+};
+
+export type RepositoryIndexRefresh = {
+  index: RepositoryIndex;
+  /** Counters only; never source text, paths or vectors. */
+  stats: IndexUpdateStats;
+  /** What was found on disk before this refresh. */
+  loaded: IndexLoadResult["status"];
+};
+
+/** Current eligible source files, each with the cheapest identity available. */
+async function scanSourceFiles(
+  input: RepositoryIndexInput,
+): Promise<SourceFileRef[]> {
+  const { root, signal } = input;
+  const entries: TreeEntry[] = input.gitRevision
+    ? await revisionEntries(root, input.gitRevision, signal)
+    : (await workingTreeNames(root, signal)).map((name) => ({ name }));
+  const refs: SourceFileRef[] = [];
+  for (const entry of entries) {
+    signal?.throwIfAborted();
+    const name = entry.name.replaceAll("\\", "/");
+    if (
+      !INDEXABLE.test(name) ||
+      entry.symlink ||
+      (entry.size !== undefined && entry.size > MAX_FILE_BYTES) ||
+      isMandatorySensitivePath(name) ||
+      isIgnoredPath(name, input.ignorePolicy)
+    )
+      continue;
+    if (input.gitRevision) {
+      const revision = input.gitRevision;
+      refs.push({
+        path: name,
+        size: entry.size,
+        blobId: entry.blobId,
+        read: async () => {
+          const content = await runGit(
+            root,
+            ["show", `--no-textconv`, `${revision}:${name}`],
+            signal,
+          );
+          if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES)
+            return undefined;
+          return inspectSensitiveContent(content) ? undefined : content;
+        },
+      });
+      continue;
+    }
+    let stat: { size: number; mtimeMs: number };
+    try {
+      stat = await inspectContainedRegularFile(root, name);
+    } catch {
+      continue; // Unreadable, symlinked and absent entries are unavailable.
+    }
+    if (stat.size > MAX_FILE_BYTES) continue;
+    refs.push({
+      path: name,
+      ...(input.trustFileStat === false
+        ? {}
+        : { size: stat.size, mtimeMs: stat.mtimeMs }),
+      read: async () => {
+        // Containment is re-checked at the moment of reading, not only at scan.
+        const current = await inspectContainedRegularFile(root, name);
+        if (current.size > MAX_FILE_BYTES) return undefined;
+        const content = await readFile(resolve(root, name), "utf8");
+        return inspectSensitiveContent(content) ? undefined : content;
+      },
+    });
+  }
+  return refs;
+}
+
+/**
+ * Load, reconcile and atomically persist the repository index. The next index
+ * is built and validated entirely in memory; the file is replaced only after
+ * that succeeds, so a failure (provider error, cancellation, exhausted request
+ * budget) leaves the previous complete index untouched.
+ */
+export async function refreshRepositoryIndex(
+  input: RepositoryIndexInput,
+): Promise<RepositoryIndexRefresh> {
   input.signal?.throwIfAborted();
   const path = indexPath(input.root, input.cacheDirName);
-  // Chunks are always regenerated from source; only compatible vectors carry
-  // over. A corrupt or stale file therefore costs a re-embed, never correctness.
   const loaded = await readIndex(path, {
     chunkerVersion: CHUNKER_VERSION,
     maxChunkTokens: input.maxChunkTokens,
+    policyVersion: POLICY_VERSION,
+    repositoryId: input.repositoryId,
   });
   if (loaded.status === "corrupt")
     input.onDiagnostic?.(
       `Persisted repository index was unusable (${loaded.reason}); rebuilt from source.`,
     );
-  else if (loaded.status === "stale")
+  else if (loaded.status === "incompatible")
     input.onDiagnostic?.(
-      `Persisted repository index was stale (${loaded.reason}); rebuilt from source.`,
+      `Persisted repository index was incompatible (${loaded.reason}); rebuilt from source.`,
     );
-  const old = loaded.status === "valid" ? loaded.index : undefined;
-  const entries: IndexEntry[] = input.gitRevision
-    ? await revisionEntries(input.root, input.gitRevision, input.signal)
-    : (await workingTreeNames(input.root, input.signal)).map((name) => ({
-        name,
-      }));
-  const chunks: ContextChunk[] = [];
-  for (const entry of entries) {
-    input.signal?.throwIfAborted();
-    const name = entry.name.replaceAll("\\", "/");
-    if (
-      !INDEXABLE.test(name) ||
-      entry.symlink ||
-      (entry.size !== undefined && entry.size > 1024 * 1024) ||
-      isMandatorySensitivePath(name) ||
-      isIgnoredPath(name, input.ignorePolicy)
-    )
-      continue;
-    try {
-      let content: string;
-      if (input.gitRevision) {
-        content = await runGit(
-          input.root,
-          ["show", `--no-textconv`, `${input.gitRevision}:${name}`],
-          input.signal,
-        );
-        if (Buffer.byteLength(content, "utf8") > 1024 * 1024) continue;
-      } else {
-        const size = await assertContainedRegularFile(input.root, name);
-        if (size > 1024 * 1024) continue;
-        content = await readFile(resolve(input.root, name), "utf8");
-      }
-      if (inspectSensitiveContent(content)) continue;
-      chunks.push(
-        ...chunkSource({
-          repositoryId: input.repositoryId,
-          revision: input.revision,
-          path: name,
-          content,
-          maxTokens: input.maxChunkTokens,
-        }),
-      );
-    } catch (error) {
-      if (input.signal?.aborted) throw error;
-      /* Unreadable, binary, symlink, and absent revision entries are unavailable. */
-    }
-  }
-
-  const vectors: Record<string, StoredVector> = {};
-  const currentInputHashes = new Set(chunks.map(embeddingInputHash));
-  for (const [key, vector] of Object.entries(old?.vectors ?? {}))
-    if (validStoredVector(vector, currentInputHashes, input.maxChunkTokens))
-      vectors[key] = vector;
-
-  if (input.embedding) {
-    const missing = [];
-    for (const chunk of chunks) {
-      const cacheKey = embeddingCacheKey(
-        chunk,
-        input.embedding,
-        input.maxChunkTokens,
-      );
-      const cached = vectors[cacheKey];
-      if (
-        cached &&
-        cached.provider === input.embedding.provider &&
-        cached.model === input.embedding.model &&
-        cached.version === input.embedding.version &&
-        cached.dimensionIdentity ===
-          String(input.embedding.dimensions ?? "provider-default")
-      )
-        continue;
-      delete vectors[cacheKey];
-      missing.push({ chunk, cacheKey });
-    }
-    const batchSize = Math.max(1, input.maxEmbeddingBatchSize ?? 32);
-    for (let offset = 0; offset < missing.length; offset += batchSize) {
-      input.signal?.throwIfAborted();
-      const batch = missing.slice(offset, offset + batchSize);
-      input.beforeEmbeddingRequest?.();
-      const embedded = await input.embedding.embed(
-        batch.map(({ chunk }) => normalizedEmbeddingInput(chunk)),
-        input.signal,
-      );
-      input.onEmbeddingRequest?.();
-      const dimensions = validateEmbeddingBatch(
-        embedded,
-        batch.length,
-        input.embedding.dimensions,
-      );
-      batch.forEach((item, index) => {
-        vectors[item.cacheKey] = {
-          cacheKey: item.cacheKey,
-          values: embedded[index]!,
-          inputHash: embeddingInputHash(item.chunk),
-          dimensions,
-          provider: input.embedding!.provider,
-          model: input.embedding!.model,
-          version: input.embedding!.version,
-          dimensionIdentity: String(
-            input.embedding!.dimensions ?? "provider-default",
-          ),
-          chunkerVersion: CHUNKER_VERSION,
-          maxChunkTokens: input.maxChunkTokens,
-        };
-      });
-    }
-  }
-  const index: RepositoryIndex = {
-    schemaVersion: 1,
-    chunkerVersion: CHUNKER_VERSION,
+  const files = await scanSourceFiles(input);
+  const { index, stats } = await updateRepositoryIndex({
+    previous: loaded.status === "valid" ? loaded.index : undefined,
     repositoryId: input.repositoryId,
     revision: input.revision,
     maxChunkTokens: input.maxChunkTokens,
-    createdAt: new Date().toISOString(),
-    chunks,
-    vectors,
-  };
+    files,
+    embedding: input.embedding,
+    signal: input.signal,
+    beforeEmbeddingRequest: input.beforeEmbeddingRequest,
+    onEmbeddingRequest: input.onEmbeddingRequest,
+    maxEmbeddingBatchSize: input.maxEmbeddingBatchSize,
+    chunk: input.chunk,
+  });
   await writeFileAtomic(path, JSON.stringify(index));
-  return index;
+  return { index, stats, loaded: loaded.status };
+}
+
+export async function buildRepositoryIndex(
+  input: RepositoryIndexInput,
+): Promise<RepositoryIndex> {
+  return (await refreshRepositoryIndex(input)).index;
 }

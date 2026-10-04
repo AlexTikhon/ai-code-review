@@ -39,6 +39,39 @@ type ChunkBase = Omit<
   | "omissionReason"
 >;
 
+function chunkId(
+  base: { repositoryId: string; revision: string; path: string },
+  startLine: number,
+  endLine: number,
+  contentHash: string,
+): string {
+  return hash(
+    `${base.repositoryId}\0${base.revision}\0${base.path}\0${startLine}\0${endLine}\0${contentHash}\0${CHUNKER_VERSION}`,
+  ).slice(0, 24);
+}
+
+/**
+ * The same chunk under another snapshot revision. Only the revision and the
+ * revision-derived id change, so an unchanged file never needs re-parsing when
+ * the snapshot moves.
+ */
+export function rebindChunk(
+  chunk: ContextChunk,
+  revision: string,
+): ContextChunk {
+  if (chunk.revision === revision) return chunk;
+  return {
+    ...chunk,
+    revision,
+    id: chunkId(
+      { ...chunk, revision },
+      chunk.startLine,
+      chunk.endLine,
+      chunk.contentHash,
+    ),
+  };
+}
+
 function makeChunk(
   base: ChunkBase,
   content: string,
@@ -56,9 +89,7 @@ function makeChunk(
     contentComplete,
     omissionReason,
     contentHash,
-    id: hash(
-      `${base.repositoryId}\0${base.revision}\0${base.path}\0${startLine}\0${endLine}\0${contentHash}\0${CHUNKER_VERSION}`,
-    ).slice(0, 24),
+    id: chunkId(base, startLine, endLine, contentHash),
   };
 }
 

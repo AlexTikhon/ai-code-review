@@ -112,6 +112,14 @@ export async function assertContainedRegularFile(
   repositoryRoot: string,
   filename: string,
 ): Promise<number> {
+  return (await inspectContainedRegularFile(repositoryRoot, filename)).size;
+}
+
+/** Same containment checks as above, also reporting the mtime for reuse hints. */
+export async function inspectContainedRegularFile(
+  repositoryRoot: string,
+  filename: string,
+): Promise<{ size: number; mtimeMs: number }> {
   const root = await realpath(repositoryRoot);
   const candidate = resolve(root, filename);
   const rel = relative(root, candidate);
@@ -135,5 +143,5 @@ export async function assertContainedRegularFile(
   )
     throw new Error(`Resolved path escapes repository root: ${filename}`);
   if (!stat.isFile()) throw new Error(`Not a regular file: ${filename}`);
-  return stat.size;
+  return { size: stat.size, mtimeMs: stat.mtimeMs };
 }

@@ -1,8 +1,8 @@
 import { emitEvent } from "../../observability/events.js";
 import type { EmbeddingAdapter } from "../../retrieval/embeddings.js";
 import {
-  buildRepositoryIndex,
   indexPath,
+  refreshRepositoryIndex,
 } from "../../retrieval/index-store.js";
 import {
   prepareRepositoryIndex,
@@ -54,7 +54,7 @@ export async function contextStage(
   const embedding = hybrid ? ctx.embedding : undefined;
   const diagnostics: string[] = [];
   try {
-    const index = await buildRepositoryIndex({
+    const { index, stats, loaded } = await refreshRepositoryIndex({
       root: source.repositoryRoot,
       repositoryId: source.repositoryId,
       revision: source.snapshotId,
@@ -83,6 +83,19 @@ export async function contextStage(
         chunks: index.chunks.length,
         vectors: Object.keys(index.vectors).length,
         semantic: Boolean(embedding),
+        // Counters only: never file names, source text, or vectors.
+        loaded,
+        previous: stats.previous,
+        filesTotal: stats.filesTotal,
+        filesReused: stats.filesReused,
+        filesIndexed: stats.filesIndexed,
+        filesDeleted: stats.filesDeleted,
+        filesRead: stats.filesRead,
+        chunksReused: stats.chunksReused,
+        chunksCreated: stats.chunksCreated,
+        vectorsReused: stats.vectorsReused,
+        vectorsCreated: stats.vectorsCreated,
+        embeddingRequests: stats.embeddingRequests,
       },
     });
     return {

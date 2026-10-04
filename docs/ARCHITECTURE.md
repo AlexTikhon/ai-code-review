@@ -53,17 +53,53 @@ TypeScript/JavaScript are parsed with the runtime TypeScript compiler API. Top-l
 
 All chunks obey the conservative UTF-8-byte budget for ASCII and multibyte input. Retrieval generates lexical/symbol and semantic shortlists independently, merges and deduplicates their union, then ranks it. Stored/query vector counts, finite values, provider identity, and dimensions are validated; incompatible vector spaces fail explicitly. Same-file chunks remain eligible with a small boost because helpers and enclosing definitions can be relevant. Candidate count, top-k, threshold, and budgets are configurable experimental defaults. Selected IDs, scores, and reasons appear in the result.
 
-The persistent store is a mode-0600 JSON file under `.ai-reviewer/cache`. Indexes carry repository and snapshot identity. Local snapshots hash `HEAD` plus working-tree patch identities and index the working tree. PR indexes enumerate and read the exact head Git tree, independent of the checkout’s current `HEAD` or dirty/untracked files; the trusted ignore policy remains the API-fetched base-revision policy. Rebuilds remove obsolete inputs while lexical rebuilds retain compatible vectors. Vector keys cover the exact normalized input (including path/signature/content), provider/model/version, configured/default dimension identity, chunker version, and chunk budget. Retrieval rejects repository/revision mismatch.
+The persistent store is a mode-0600 JSON file under `.ai-reviewer/cache`. Indexes carry repository and snapshot identity. Local snapshots hash `HEAD` plus working-tree patch identities and index the working tree. PR indexes enumerate and read the exact head Git tree, independent of the checkout’s current `HEAD` or dirty/untracked files; the trusted ignore policy remains the API-fetched base-revision policy. Rebuilds are incremental per file (next section), and vector keys cover the exact normalized input (including path/signature/content), provider/model/version, configured/default dimension identity, chunker version, and chunk budget. Retrieval rejects repository/revision mismatch.
 
 Cross-file verification is bounded by the same top-k and prompt token limit: retrieved definitions/import neighbors can be cited as concrete evidence. No recursive agent or unbounded whole-repository prompt is used.
 
-## Persisted index and prepared runtime index
+## Repository index: incremental update and prepared runtime form
 
-The persisted `RepositoryIndex` is plain JSON (`schemaVersion` 1): repository identity, snapshot `revision`, `chunkerVersion`, `maxChunkTokens`, chunks, and a `vectors` record keyed by embedding cache key. `readIndex()` validates it with Zod (`src/retrieval/index-schema.ts`) before anything uses it: schema version, identity and revision on the index and on every chunk, chunk line ranges, vector metadata, declared dimensions equal to the value count, finite numbers, and each record key equal to its `cacheKey`.
+```text
+Persisted RepositoryIndex (plain JSON, schemaVersion 2)
+   +-- files   : per-file identity (content hash, size, blob id / mtime hint, chunk ids)
+   +-- chunks  : in repository order, each owned by exactly one file
+   +-- vectors : keyed by embedding cache key
+        |
+        v   updateRepositoryIndex(previous, currentFiles, deps) -> next
+   incremental reconciliation
+        |      unchanged -> reuse chunks (rebound to the new revision) and vectors
+        |      modified  -> re-read, re-chunk, embed only inputs without a stored vector
+        |      added     -> chunk, embed
+        |      deleted   -> dropped with its chunks, vectors and lexical entries
+        v
+   validated in memory, then written atomically
+        |
+        v   prepareRepositoryIndex()
+PreparedRepositoryIndex (runtime only: Maps, never serialized)
+   +-- chunks in deterministic order, with embedding input hashes
+   +-- vectorsByInputHash        : O(1) stored-vector lookup
+   +-- lexical (LexicalIndex)    : postings, symbol, path and import lookups
+```
 
-The result is `missing`, `valid`, `corrupt` (unreadable, not JSON, or invalid) or `stale` (valid but built with a different chunker version or chunk budget). Chunks are always regenerated from source and only compatible vectors carry over, so a corrupt or stale file is rebuilt, costs at most a re-embed, and is reported as a value-free diagnostic in `context.message`. Nothing is reused from it. Writes are atomic: a unique temporary file, then rename, mode 0600, temporary removed on failure.
+**Persisted form.** `RepositoryIndex` is plain JSON validated with Zod on load (`src/retrieval/index-schema.ts`): schema, chunker and policy versions, identity and revision on the index and on every chunk, line ranges, vector metadata, declared dimensions, finite numbers, and each vector key equal to its `cacheKey`. Every chunk must belong to exactly one `files` entry whose path matches, so a reused file can never resurrect another path’s chunks or leave ownerless ones. A file entry records its SHA-256 content hash, size, a Git blob id (revision indexes) or a working-tree mtime hint, and its chunk ids. Reuse is decided by content identity: a blob id, or a content hash after a read. A matching size and mtime only avoids that read, and only for mtimes older than a two-second window, so a file rewritten in the same timestamp tick is never trusted by timestamp. Like Git’s own index, this cannot see a same-size rewrite that also restores the old mtime; `trustFileStat: false` reads and hashes every file instead. PR indexes use blob ids from the tree listing, so unchanged files cost no `git show`.
 
-Retrieval runs on a `PreparedRepositoryIndex`, compiled once per run from the persisted index (`src/retrieval/prepared-index.ts`): per-chunk term sets, lower-cased symbol names, normalized import needles, per-chunk embedding input hashes, and a `Map` from input hash to stored vectors. It holds `Set`/`Map` values, is never serialized, and is shared by every review segment. This removed a per-chunk linear scan of all stored vectors (O(chunks × vectors) per segment) and the per-segment re-tokenization and re-hashing of every chunk. Ranking semantics are unchanged; `retrieveContext` still accepts a raw `RepositoryIndex` and prepares it on the fly.
+**Load outcomes.** `readIndex()` returns `missing`, `valid`, `corrupt` (unreadable, not JSON, or any schema or consistency violation), `incompatible` (well-formed but made by another schema version, chunker version, chunk budget, privacy-policy version or repository) or `stale` (compatible but for a different revision than a caller required). Corrupt and incompatible indexes are not reused at all: they are rebuilt from source and reported as a value-free diagnostic in `context.message`. A moved revision is the normal case, not an error. The index refresh reconciles file by file and rebinds each reused chunk to the new revision, which changes only its revision and revision-derived id.
+
+**What is reused when.**
+
+| Change                                                              | Chunks                                            | Vectors                                              | Files read                                                    |
+| ------------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------- |
+| Nothing                                                             | all reused                                        | all reused, zero embedding requests                  | none (blob id, or size+mtime hint older than the racy window) |
+| New revision, same files                                            | all reused, rebound                               | all reused                                           | none                                                          |
+| One file edited                                                     | the others reused; that file re-chunked           | only inputs without a stored vector are embedded     | that file                                                     |
+| File added or deleted                                               | others reused; deleted chunks and vectors dropped | new inputs embedded; orphaned vectors pruned         | the added file                                                |
+| File renamed                                                        | delete plus add                                   | re-embedded: the path is part of the embedding input | the new path                                                  |
+| Chunker version, chunk budget, privacy policy or repository changes | none                                              | none (their keys cover chunker and budget)           | all                                                           |
+| Embedding provider, model, version or dimensions change             | all reused                                        | not reused; recomputed for the new identity          | none                                                          |
+
+The next index is computed as a value from the previous one, validated against the same schema, and only then written with the atomic write-then-rename. Embedding failure, cancellation, request-budget exhaustion or a validation failure throws before anything is written, so the previous complete index stays intact (partial embedding progress is discarded). Only missing vectors cost requests, each batch calls `ExternalRequestBudget.reserve` first, batches run sequentially, and without embedding authorization no provider is ever called. The index stage’s event carries counters only (files total, reused, indexed, deleted and read; chunks and vectors reused and created; embedding requests), never paths, source text or vectors.
+
+**Prepared runtime form.** Retrieval runs on a `PreparedRepositoryIndex`, compiled once per run (`src/retrieval/prepared-index.ts`, `lexical-index.ts`) and shared by every review segment. The inverted `LexicalIndex` maps each term to the ordinals of the chunks containing it, plus lookups from lower-cased symbol name, file path and import needle to their chunks; ordinals ascend in repository order. The score is unchanged: overlap over query-term count, plus import, symbol and same-file boosts, capped at 1. A query now scores only chunks reached through those lists, keeps the best `candidates` by score and then repository order, and appends zero-score chunks in repository order only when positive matches do not fill the limit, which is exactly what the previous full scan’s stable sort produced. Query cost therefore follows posting-list lengths and the number of distinct import needles, not the chunk count; a term present in most chunks still touches most chunks. There is no BM25 or document-length statistic because the scorer uses none. Parity with the reference scan is tested over randomized indexes, and `retrieveContext` still accepts a raw `RepositoryIndex` and prepares it on the fly.
 
 ## Work, request, and time budgets
 
@@ -99,5 +135,6 @@ Resolve and inspect that repository-local path before deletion. Removing it only
 - PR retrieval needs a local Git object database containing the head SHA; remote repository trees are not cloned or fetched automatically.
 - Token counting uses a conservative byte fallback, not a model-specific tokenizer; provider usage remains authoritative when returned.
 - The JSON vector store is intended for local/small-to-medium repositories, not multi-user concurrent service workloads.
-- Lexical retrieval still scores every chunk for each segment. Term sets are precomputed but there is no inverted index, because zero-score chunks must stay candidates to preserve ranking behavior.
+- Lexical retrieval is posting-list bound: a term that occurs in most chunks (for example `return`) still touches most chunks. Semantic retrieval still compares the query vector with every stored vector, and embedding input hashes are recomputed from chunk text each run.
+- The per-file containment check at scan time (one `lstat` and two `realpath` calls) runs on every run, even for unchanged files. A failed embedding update discards its partial embedding progress rather than persisting a partial index. Indexes written by schema version 1 are rebuilt, not migrated.
 - Token usage of a model response rejected for invalid evidence is not added to `usage.inputTokens`/`outputTokens`, although the attempt itself is counted.

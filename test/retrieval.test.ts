@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { INDEX_SCHEMA_VERSION } from "../src/retrieval/types.js";
+import { POLICY_VERSION } from "../src/review/types.js";
+import { filesForChunks } from "./index-fixtures.js";
 import { chunkSource } from "../src/retrieval/chunker.js";
 import { DeterministicTestEmbedding } from "../src/retrieval/embeddings.js";
 import { retrieveContext } from "../src/retrieval/retrieve.js";
@@ -75,12 +78,14 @@ unitTest(
       };
     }
     const index: RepositoryIndex = {
-      schemaVersion: 1,
+      schemaVersion: INDEX_SCHEMA_VERSION,
+      policyVersion: POLICY_VERSION,
       chunkerVersion: CHUNKER_VERSION,
       repositoryId: "r",
       revision: "v",
       maxChunkTokens: 100,
       createdAt: "now",
+      files: filesForChunks(chunks),
       chunks,
       vectors,
     };
@@ -115,12 +120,14 @@ unitTest(
   "retrieval refuses stale revisions and repository crossover",
   async () => {
     const index: RepositoryIndex = {
-      schemaVersion: 1,
+      schemaVersion: INDEX_SCHEMA_VERSION,
+      policyVersion: POLICY_VERSION,
       chunkerVersion: CHUNKER_VERSION,
       repositoryId: "a",
       revision: "1",
       maxChunkTokens: 100,
       createdAt: "now",
+      files: filesForChunks([]),
       chunks: [],
       vectors: {},
     };
@@ -315,12 +322,14 @@ unitTest(
     }
     const found = await retrieveContext({
       index: {
-        schemaVersion: 1,
+        schemaVersion: INDEX_SCHEMA_VERSION,
+        policyVersion: POLICY_VERSION,
         chunkerVersion: CHUNKER_VERSION,
         repositoryId: "r",
         revision: "v",
         maxChunkTokens: 100,
         createdAt: "now",
+        files: filesForChunks([noise, relevant]),
         chunks: [noise, relevant],
         vectors,
       },
@@ -360,12 +369,14 @@ unitTest(
     await assert.rejects(
       retrieveContext({
         index: {
-          schemaVersion: 1,
+          schemaVersion: INDEX_SCHEMA_VERSION,
+          policyVersion: POLICY_VERSION,
           chunkerVersion: CHUNKER_VERSION,
           repositoryId: "r",
           revision: "v",
           maxChunkTokens: 100,
           createdAt: "now",
+          files: filesForChunks([chunk]),
           chunks: [chunk],
           vectors: {
             [key]: {
@@ -532,12 +543,14 @@ unitTest("same-file helper context remains retrievable", async () => {
   });
   const result = await retrieveContext({
     index: {
-      schemaVersion: 1,
+      schemaVersion: INDEX_SCHEMA_VERSION,
+      policyVersion: POLICY_VERSION,
       chunkerVersion: CHUNKER_VERSION,
       repositoryId: "r",
       revision: "v",
       maxChunkTokens: 200,
       createdAt: "now",
+      files: filesForChunks(chunks),
       chunks,
       vectors: {},
     },

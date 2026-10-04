@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { RepositoryIndex } from "./types.js";
+import { INDEX_SCHEMA_VERSION, type RepositoryIndex } from "./types.js";
 
 const nonEmpty = z.string().min(1);
 const finiteNumberArray = z.custom<number[]>(
@@ -47,22 +47,62 @@ const vectorSchema = z
     "vector length does not match declared dimensions",
   );
 
+const fileSchema = z.object({
+  path: nonEmpty,
+  contentHash: nonEmpty,
+  size: z.number().int().nonnegative(),
+  blobId: nonEmpty.optional(),
+  mtimeMs: z.number().finite().optional(),
+  chunkIds: z.array(nonEmpty),
+});
+
 /**
  * Runtime contract for the persisted JSON. Unknown shapes are rejected rather
  * than trusted, so a damaged cache file can never reach retrieval code.
  */
 export const repositoryIndexSchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(INDEX_SCHEMA_VERSION),
     chunkerVersion: nonEmpty,
+    policyVersion: nonEmpty,
     repositoryId: nonEmpty,
     revision: nonEmpty,
     maxChunkTokens: z.number().int().positive(),
     createdAt: z.string(),
+    files: z.array(fileSchema),
     chunks: z.array(chunkSchema),
     vectors: z.record(vectorSchema),
   })
   .superRefine((index, context) => {
+    // Every chunk must belong to exactly one file entry, so a reused file can
+    // never resurrect chunks of another path or leave ownerless chunks behind.
+    const chunksById = new Map(index.chunks.map((chunk) => [chunk.id, chunk]));
+    const seenPaths = new Set<string>();
+    let owned = 0;
+    index.files.forEach((file, position) => {
+      if (seenPaths.has(file.path))
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["files", position, "path"],
+          message: "duplicate file path",
+        });
+      seenPaths.add(file.path);
+      owned += file.chunkIds.length;
+      for (const id of file.chunkIds)
+        if (chunksById.get(id)?.path !== file.path)
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["files", position, "chunkIds"],
+            message:
+              "file references a chunk that is missing or has another path",
+          });
+    });
+    if (owned !== index.chunks.length)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["files"],
+        message: "chunks and file entries disagree",
+      });
     const mismatched = index.chunks.findIndex(
       (chunk) =>
         chunk.repositoryId !== index.repositoryId ||

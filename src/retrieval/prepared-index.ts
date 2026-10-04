@@ -1,20 +1,10 @@
 import { embeddingInputHash } from "./index-store.js";
 import type { EmbeddingAdapter } from "./embeddings.js";
+import { buildLexicalIndex, type LexicalIndex } from "./lexical-index.js";
 import type { ContextChunk, RepositoryIndex, StoredVector } from "./types.js";
-
-/** Lexical terms shared by index preparation and query tokenization. */
-export function lexicalTokens(value: string): Set<string> {
-  return new Set(value.toLowerCase().match(/[a-z_$][\w$]{2,}/g) ?? []);
-}
 
 export type PreparedChunk = {
   readonly chunk: ContextChunk;
-  /** Pre-tokenized path, name, signature, imports and content. */
-  readonly terms: ReadonlySet<string>;
-  /** Lower-cased symbol name; undefined when the chunk has none. */
-  readonly nameTerm?: string;
-  /** Imports with a leading "./" removed, for import-link matching. */
-  readonly importNeedles: readonly string[];
   /** Hash of the exact embedding input, computed once per run. */
   readonly inputHash: string;
 };
@@ -31,7 +21,10 @@ export type PreparedRepositoryIndex = {
   readonly revision: string;
   readonly chunkerVersion: string;
   readonly maxChunkTokens: number;
+  /** Chunks in deterministic repository order. */
   readonly chunks: readonly PreparedChunk[];
+  /** Inverted lexical lookups over the same chunks, tokenized once. */
+  readonly lexical: LexicalIndex;
   /** Stored vectors grouped by input hash, in persisted order. */
   readonly vectorsByInputHash: ReadonlyMap<string, readonly StoredVector[]>;
 };
@@ -61,13 +54,9 @@ export function prepareRepositoryIndex(
     maxChunkTokens: index.maxChunkTokens,
     chunks: index.chunks.map((chunk) => ({
       chunk,
-      terms: lexicalTokens(
-        `${chunk.path} ${chunk.name ?? ""} ${chunk.signature ?? ""} ${chunk.imports.join(" ")} ${chunk.content}`,
-      ),
-      nameTerm: chunk.name ? chunk.name.toLowerCase() : undefined,
-      importNeedles: chunk.imports.map((item) => item.replace(/^\.\//, "")),
       inputHash: embeddingInputHash(chunk),
     })),
+    lexical: buildLexicalIndex(index.chunks),
     vectorsByInputHash,
   };
 }

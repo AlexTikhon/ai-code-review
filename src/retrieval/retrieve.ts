@@ -1,8 +1,8 @@
 import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
+import { rankLexicalCandidates } from "./lexical-index.js";
 import {
   findStoredVector,
   isPreparedIndex,
-  lexicalTokens,
   prepareRepositoryIndex,
   type PreparedRepositoryIndex,
 } from "./prepared-index.js";
@@ -60,37 +60,12 @@ export async function retrieveContext(input: {
   const index = isPreparedIndex(input.index)
     ? input.index
     : prepareRepositoryIndex(input.index);
-  const queryTokens = lexicalTokens(input.query);
-  const lexical = index.chunks
-    .map((prepared) => {
-      const { chunk } = prepared;
-      let overlap = 0;
-      for (const token of queryTokens) if (prepared.terms.has(token)) overlap++;
-      const importBoost = prepared.importNeedles.some((needle) =>
-        input.changedPath.includes(needle),
-      )
-        ? 0.2
-        : 0;
-      const symbolBoost =
-        prepared.nameTerm && queryTokens.has(prepared.nameTerm) ? 0.35 : 0;
-      const sameFileBoost = chunk.path === input.changedPath ? 0.05 : 0;
-      const score = Math.min(
-        1,
-        (queryTokens.size ? overlap / queryTokens.size : 0) +
-          importBoost +
-          symbolBoost +
-          sameFileBoost,
-      );
-      const reasons = [
-        overlap ? `keyword-overlap:${overlap}` : "",
-        importBoost ? "import-link" : "",
-        symbolBoost ? "symbol-match" : "",
-        sameFileBoost ? "same-file" : "",
-      ].filter(Boolean);
-      return { chunk, score, reasons } as RetrievalCandidate;
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, input.candidates);
+  const { candidates: lexical } = rankLexicalCandidates(
+    index.lexical,
+    input.query,
+    input.changedPath,
+    input.candidates,
+  );
 
   const semantic: RetrievalCandidate[] = [];
   if (input.mode === "hybrid" && input.embedding) {
