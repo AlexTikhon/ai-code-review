@@ -1,4 +1,8 @@
-import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
+import {
+  executeEmbeddingRequest,
+  type EmbeddingExecutionOptions,
+} from "./embedding-execution.js";
+import type { EmbeddingAdapter } from "./embeddings.js";
 import { rankLexicalCandidates } from "./lexical-index.js";
 import {
   isPreparedIndex,
@@ -32,7 +36,9 @@ export async function retrieveContext(input: {
   threshold: number;
   embedding?: EmbeddingAdapter;
   signal?: AbortSignal;
+  /** Reserves one request-budget unit; called before every provider attempt, retries included. */
   beforeEmbeddingRequest?: () => void;
+  embeddingExecution?: EmbeddingExecutionOptions;
 }): Promise<RetrievalCandidate[]> {
   if (
     input.index.repositoryId !== input.repositoryId ||
@@ -55,9 +61,13 @@ export async function retrieveContext(input: {
   const semantic: RetrievalCandidate[] = [];
   if (input.mode === "hybrid" && input.embedding) {
     input.signal?.throwIfAborted();
-    input.beforeEmbeddingRequest?.();
-    const vectors = await input.embedding.embed([input.query], input.signal);
-    validateEmbeddingBatch(vectors, 1, input.embedding.dimensions);
+    const { vectors } = await executeEmbeddingRequest({
+      ...input.embeddingExecution,
+      adapter: input.embedding,
+      texts: [input.query],
+      signal: input.signal,
+      beforeAttempt: input.beforeEmbeddingRequest,
+    });
     // Packed once per prepared index. The search scores numbers only; chunk
     // objects are resolved below for the winning ordinals alone.
     const space = semanticSpaceFor(index, input.embedding);

@@ -78,8 +78,20 @@ export class ReviewModelError extends Error {
   }
 }
 
-/** HTTP semantics shared by every provider. */
-export function kindForHttpStatus(status: number | undefined): ModelErrorKind {
+/** The kinds an HTTP status alone can decide; common to every external-call domain. */
+export type HttpErrorKind = Extract<
+  ModelErrorKind,
+  | "authentication"
+  | "unsupported_model"
+  | "timeout"
+  | "rate_limit"
+  | "provider_unavailable"
+  | "invalid_request"
+  | "unknown"
+>;
+
+/** HTTP semantics shared by every provider (and by embedding providers). */
+export function kindForHttpStatus(status: number | undefined): HttpErrorKind {
   if (status === undefined) return "unknown";
   if (status === 401 || status === 403) return "authentication";
   if (status === 404) return "unsupported_model";

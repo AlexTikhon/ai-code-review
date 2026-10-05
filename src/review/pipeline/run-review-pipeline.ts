@@ -129,6 +129,8 @@ export async function executeReviewPipeline(
     events,
     now,
     signal: deadline.signal,
+    deadlineAt: started + config.totalTimeoutMs,
+    embeddingSeams: runtime.embeddingExecution,
     budget: new ExternalRequestBudget(config.maxRequests, deadline.signal),
   };
   let result: ReviewResult | undefined;

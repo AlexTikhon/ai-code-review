@@ -21,6 +21,7 @@ import type {
   ReviewableFile,
   ReviewerFinding,
 } from "../types.js";
+import { embeddingExecutionFor } from "./embedding-execution.js";
 import { addUsage, emptyUsageDelta } from "./aggregate.js";
 import {
   invalidEvidenceFailure,
@@ -97,6 +98,7 @@ async function reviewSegment(
           ctx.request.contextMode === "hybrid" ? job.embedding : undefined,
         signal: ctx.signal,
         beforeEmbeddingRequest: () => ctx.budget.reserve("embedding"),
+        embeddingExecution: embeddingExecutionFor(ctx),
       });
       emitEvent(ctx.events, ctx.runId, "retrieve", "complete", {
         filename: file.filename,

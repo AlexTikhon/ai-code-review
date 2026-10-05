@@ -85,6 +85,45 @@ SDK / HTTP failure
 
 Findings require severity, category, confidence, evidence, and stable IDs. The diff is parsed once into persistent old/new line mappings before segmentation. Direct evidence must cover only complete added lines actually present in that segment; line zero, omitted lines, gaps, and fragments of oversized lines are rejected. Deletions retain old-line mappings for inspection but cannot be emitted as positive-file locations: a deletion-related finding must anchor to a supplied added line or a complete retrieved context range. Invalid locations are rejected before a response can enter the cache. Deduplication uses normalized finding identity. A valid citation means “this supplied location was referenced,” not “the claim is proven.” The response schema supports abstention.
 
+## Embedding failures and retries
+
+Embeddings are a separate provider domain from the review model, with their own typed error and their own retry executor. They never depend on `AI_REVIEW_PROVIDER`.
+
+```text
+index batch / query embedding
+        |
+  executeEmbeddingRequest       (src/retrieval/embedding-execution.ts: the only retry owner)
+        |   assertReady          misconfiguration fails before any budget is spent
+        |   reserve budget       one unit per attempt, taken only when that attempt starts
+        |   per-attempt timeout  AbortSignal.any([total deadline, attempt timeout])
+        v
+  EmbeddingAdapter.embed         exactly one provider attempt, no retry inside
+        |
+  EmbeddingError {kind, provider, retryable, statusCode?, retryAfterMs?, code?}
+        |
+  retry decision -> wait (Retry-After | jittered backoff) -> next attempt
+        |
+  validate answer -> vectors -> checkpoint (index-update) -> atomic publish
+```
+
+`EmbeddingError` (`src/retrieval/embedding-errors.ts`) has a closed set of kinds: `authentication`, `rate_limit`, `timeout`, `network`, `provider_unavailable`, `invalid_request`, `unsupported_model`, `malformed_response`, `dimension_mismatch`, `aborted`, `unknown`. Rate limit, timeout, network and provider-unavailable (5xx, 409) are retryable; everything else is permanent. The HTTP status table and `Retry-After` parsing are the model domain's (`kindForHttpStatus`, `retryAfterFromHeaders`), reused rather than copied; the error class and the executor are separate so a rate limit on embeddings (`EMBEDDING_RATE_LIMIT`) is never confused with one on the review model (`MODEL_RATE_LIMIT`). `OpenAIEmbeddingAdapter` is the only code that translates transport failures; neither the executor nor the index code inspects status numbers, SDK classes or message text. Messages keep the status and the provider's short error code only, never the response body (it can echo source text) and never a credential. The adapter calls the global `fetch` directly, which does not retry, so one attempt is one HTTP request; there is no SDK retry layer to disable, and a test proves three application attempts produce exactly three requests.
+
+**Policy.** At most `AI_REVIEW_EMBEDDING_MAX_ATTEMPTS` (default 3) attempts per request. Between attempts: a valid provider `Retry-After` (`retry-after-ms` or seconds) is honored exactly, clamped to 10 s; otherwise capped exponential backoff from `AI_REVIEW_EMBEDDING_RETRY_BASE_MS` (default 250 ms: 250, 500, 1000 ...) with equal jitter, uniform in [step/2, step]. The wait, the jitter source and the sleep are injectable, so no test waits. Each attempt has its own timeout (`AI_REVIEW_REQUEST_TIMEOUT_MS`), and an attempt timeout is retryable; the total deadline (`AI_REVIEW_TOTAL_TIMEOUT_MS`) and caller cancellation never are. A retry whose wait is not shorter than the time left before the total deadline is not started: the request fails with a non-retryable `timeout` rather than sleeping into an inevitable abort.
+
+**Budget.** One adapter call is one `ExternalRequestBudget` unit. A retry is therefore never free, and a retry's unit is reserved only when its attempt is about to start, never before its wait. Checkpoint hits, reused vectors, cancellation before send, a missing credential and an exhausted budget consume nothing further. Budget exhaustion surfaces as `RequestBudgetError` / `REQUEST_BUDGET_EXHAUSTED`, an application limit, not as an `EMBEDDING_*` provider failure.
+
+**Cancellation.** The caller's signal is checked before each attempt, after the reservation, and during the wait; an abort ends the request without a further attempt and is reported as `REVIEW_ABORTED`.
+
+**Response validation.** A 2xx is not yet a success. The adapter rejects a non-JSON body, a missing `data` array, a wrong count, a missing, duplicate, non-integer or out-of-range `index`, and a non-numeric embedding; it places each vector by its explicit `index`, not by position. The executor then checks the count, the dimension (the model's known dimension, else the batch's own) and finiteness for every adapter. All of these are non-retryable (`malformed_response`, `dimension_mismatch`): a deterministic bad payload would be paid for again and come back the same.
+
+**Batches and checkpoints.** Each index batch is its own request, so a transient failure retries that batch alone and never re-runs a completed one. After a batch succeeds its vectors join the checkpoint set, which is persisted every eighth batch and always once more when the run fails, is cancelled or exhausts its budget (unchanged policy). If one batch ultimately fails, the run still stops: later batches do not start, the canonical index is untouched, and the vectors of every earlier batch are in the checkpoint for the next run. Index-build failures are reported in `ReviewResult.errors` (stage `index`, non-fatal, review continues without repository context) with the codes `EMBEDDING_*`, `REQUEST_BUDGET_EXHAUSTED` or `REVIEW_ABORTED`; a failed query embedding for a segment is a `retrieve`-stage error on that file.
+
+**Diagnostics.** Events with stage `embedding` and the messages `embedding.request_started`, `.request_retry`, `.request_succeeded`, `.request_failed` carry provider, model, attempt, batch size, duration, error kind, retryability, `retryAfterMs`, `waitMs` and the remaining budget; never texts, vectors, credentials or provider bodies. The `index` completion event adds `embeddingRetries`.
+
+**Shared infrastructure.** `executeModel` and `executeEmbeddingRequest` are deliberately two small executors that share primitives (the status table, `Retry-After` parsing, key-safe excerpts, `ExternalRequestBudget`), not one generic loop. Their rules differ where it matters: the model executor never retries an attempt timeout (a half-finished generation may still be billed) and returns failure as data, while the embedding executor retries timeouts (embedding is idempotent and cheap) and throws, because index construction already aborts by throwing. A shared loop would have needed a flag for each of these differences.
+
+**Batch-size adaptation: not implemented.** Batches are 32 chunks of at most 800 tokens (about 26k tokens per request), far below OpenAI's embedding limits (8,191 tokens per input, 300k per request, 2,048 inputs), and no payload-too-large failure is reproducible with the current sizes. Splitting a failed batch would complicate request accounting for no demonstrated need.
+
 ## Retrieval and invalidation
 
 TypeScript/JavaScript are parsed with the runtime TypeScript compiler API. Top-level functions/classes/interfaces/types/enums/variables produce symbol chunks; imports, multiline declarations, strings, comments, templates, and nested syntax use AST boundaries. Source outside recognized declarations is retained in explicit file chunks. Other supported source extensions use line-window fallback chunks. Oversized physical lines become mapped `contentComplete=false` fragments rather than silently disappearing.
@@ -224,7 +263,7 @@ Steady state is therefore the metadata, one packed vector array per space, one n
 
 `maxFiles` and `maxSegmentsPerFile` bound logical review work. `maxRequests` is a separate atomic allowance enforced immediately before every model attempt or embedding call; retries, indexing batches, and query embeddings all consume it. No new provider call starts after cancellation or exhaustion. The total abort signal covers ingestion, Git/GitHub operations, indexing, embeddings, retrieval, retry waits, and model calls. File-diff ingestion is processed in batches of eight and index reads are sequential.
 
-`ExternalRequestBudget` is the one request boundary. Every model attempt (each retry included) and every embedding call, during indexing or for a query, calls `reserve()` synchronously immediately before the provider is invoked. A reservation either succeeds or throws when the budget is exhausted or the run is aborted. Cache hits never reserve. The budget also keeps the per-kind counts that become `usage.actualRequests` and `usage.embeddingRequests`, so those counters have one source rather than being incremented from concurrent jobs.
+`ExternalRequestBudget` is the one request boundary. Every model attempt (each retry included) and every embedding attempt (each retry included), during indexing or for a query, calls `reserve()` synchronously immediately before the provider is invoked. A reservation either succeeds or throws when the budget is exhausted or the run is aborted. Cache hits never reserve. The budget also keeps the per-kind counts that become `usage.actualRequests` and `usage.embeddingRequests`, so those counters have one source rather than being incremented from concurrent jobs.
 
 ## Concurrency, cancellation, and aggregation
 

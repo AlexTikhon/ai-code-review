@@ -8,7 +8,11 @@ import {
   normalizedEmbeddingInput,
 } from "./embedding-keys.js";
 import type { CheckpointEvent } from "./embedding-checkpoint.js";
-import { validateEmbeddingBatch, type EmbeddingAdapter } from "./embeddings.js";
+import {
+  executeEmbeddingRequest,
+  type EmbeddingExecutionOptions,
+} from "./embedding-execution.js";
+import type { EmbeddingAdapter } from "./embeddings.js";
 import { assessIndexCompatibility } from "./index-compat.js";
 import { validateRepositoryIndex } from "./index-schema.js";
 import {
@@ -68,8 +72,10 @@ export type IndexUpdateStats = {
   vectorsCreated: number;
   /** Previous vectors not carried into the next index. */
   vectorsPruned: number;
-  /** Real embedding API calls made. */
+  /** Real embedding provider attempts made, retries included. */
   embeddingRequests: number;
+  /** Of those, attempts that retried a transient failure. */
+  embeddingRetries: number;
   /** Vectors taken from the embedding checkpoint instead of the provider. */
   vectorsFromCheckpoint: number;
   /** Provider calls the checkpoint made unnecessary. */
@@ -96,8 +102,12 @@ export type IndexUpdateInput = {
   files: readonly SourceFileRef[];
   embedding?: EmbeddingAdapter;
   signal?: AbortSignal;
+  /** Reserves one request-budget unit; called before every provider attempt, retries included. */
   beforeEmbeddingRequest?: () => void;
+  /** Called after each embedding batch completes. */
   onEmbeddingRequest?: () => void;
+  /** Retry policy, timeouts and diagnostics for each batch's request. */
+  embeddingExecution?: EmbeddingExecutionOptions;
   maxEmbeddingBatchSize?: number;
   /**
    * Completed vectors from an earlier unfinished run. They are reused only
@@ -200,6 +210,7 @@ export async function updateRepositoryIndex(
     vectorsCreated: 0,
     vectorsPruned: 0,
     embeddingRequests: 0,
+    embeddingRetries: 0,
     vectorsFromCheckpoint: 0,
     embeddingRequestsAvoided: 0,
     checkpointSaves: 0,
@@ -457,20 +468,22 @@ export async function updateRepositoryIndex(
       for (let offset = 0; offset < pending.length; offset += batchSize) {
         signal?.throwIfAborted();
         const batch = pending.slice(offset, offset + batchSize);
-        input.beforeEmbeddingRequest?.();
-        // Reservation may itself have observed cancellation; never start a request after it.
-        signal?.throwIfAborted();
-        const embedded = await embedding.embed(
-          batch.map(([, { chunk }]) => normalizedEmbeddingInput(chunk)),
+        // One retry owner: the executor reserves budget per attempt, retries
+        // transient failures of this batch alone, and validates the answer.
+        const {
+          vectors: embedded,
+          dimensions,
+          attempts,
+        } = await executeEmbeddingRequest({
+          ...input.embeddingExecution,
+          adapter: embedding,
+          texts: batch.map(([, { chunk }]) => normalizedEmbeddingInput(chunk)),
           signal,
-        );
-        stats.embeddingRequests++;
+          beforeAttempt: input.beforeEmbeddingRequest,
+        });
+        stats.embeddingRequests += attempts;
+        stats.embeddingRetries += attempts - 1;
         input.onEmbeddingRequest?.();
-        const dimensions = validateEmbeddingBatch(
-          embedded,
-          batch.length,
-          embedding.dimensions,
-        );
         batch.forEach(([cacheKey, { inputHash }], position) => {
           created.set(cacheKey, {
             cacheKey,

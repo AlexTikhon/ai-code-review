@@ -1,4 +1,5 @@
 import type { ModelErrorCode } from "../model/errors.js";
+import type { EmbeddingErrorCode } from "../retrieval/embedding-errors.js";
 
 export const RESULT_SCHEMA_VERSION = "1.2.0";
 export const PROMPT_VERSION = "3.0.0";
@@ -136,6 +137,8 @@ export type Usage = {
  */
 export type ReviewErrorCode =
   | ModelErrorCode
+  /** The embedding provider failed; distinct from MODEL_* for the review model. */
+  | EmbeddingErrorCode
   /** The model answered, but a finding cited evidence that was not supplied. */
   | "MODEL_INVALID_EVIDENCE"
   | "REQUEST_BUDGET_EXHAUSTED"

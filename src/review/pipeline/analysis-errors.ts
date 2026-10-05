@@ -1,5 +1,9 @@
 import { RequestBudgetError } from "../../model/budget.js";
 import { ReviewModelError, modelErrorCode } from "../../model/errors.js";
+import {
+  EmbeddingError,
+  embeddingErrorCode,
+} from "../../retrieval/embedding-errors.js";
 import type { ReviewError } from "../types.js";
 import { errorMessage } from "./result.js";
 
@@ -72,6 +76,51 @@ export function invalidEvidenceFailure(
   };
 }
 
+/**
+ * A failure of the embedding provider or of the request cap around it. Budget
+ * exhaustion is an application constraint, never an EMBEDDING_* provider error.
+ */
+function embeddingFailure(
+  stage: ReviewError["stage"],
+  error: unknown,
+): ReviewError | undefined {
+  if (error instanceof EmbeddingError)
+    return error.kind === "aborted"
+      ? {
+          stage,
+          message: error.message,
+          fatal: false,
+          code: "REVIEW_ABORTED",
+          provider: error.provider,
+          retryable: true,
+        }
+      : {
+          stage,
+          message: error.message,
+          fatal: false,
+          code: embeddingErrorCode(error.kind),
+          provider: error.provider,
+          retryable: error.retryable,
+        };
+  if (error instanceof RequestBudgetError)
+    return {
+      stage,
+      message: error.message,
+      fatal: false,
+      code: "REQUEST_BUDGET_EXHAUSTED",
+      retryable: false,
+    };
+  return undefined;
+}
+
+/** The repository-context stage failed; reviewing continues without context. */
+export function contextFailure(error: unknown, message: string): ReviewError {
+  const typed = embeddingFailure("index", error);
+  return typed
+    ? { ...typed, message }
+    : { stage: "index", message, fatal: false };
+}
+
 /** Classify a failure that did not come from the model call itself. */
 export function unexpectedFailure(
   filename: string,
@@ -79,6 +128,14 @@ export function unexpectedFailure(
   aborted: boolean,
 ): SegmentFailure {
   if (error instanceof ReviewModelError) return modelFailure(filename, error);
+  // Retrieval embeds the query; its provider failures are not analysis bugs.
+  if (error instanceof EmbeddingError) {
+    const typed = embeddingFailure("retrieve", error)!;
+    return {
+      status: error.kind === "aborted" ? "aborted" : "internal_failure",
+      error: { ...typed, filename },
+    };
+  }
   if (error instanceof RequestBudgetError)
     return {
       status: "internal_failure",

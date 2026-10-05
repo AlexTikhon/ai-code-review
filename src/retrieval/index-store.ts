@@ -17,6 +17,7 @@ import {
   type StoredVector,
 } from "./types.js";
 import type { chunkSource } from "./chunker.js";
+import type { EmbeddingExecutionOptions } from "./embedding-execution.js";
 import type { EmbeddingAdapter } from "./embeddings.js";
 import {
   FileEmbeddingCheckpointStore,
@@ -315,6 +316,8 @@ export type RepositoryIndexInput = {
   signal?: AbortSignal;
   beforeEmbeddingRequest?: () => void;
   onEmbeddingRequest?: () => void;
+  /** Retry policy, timeouts and diagnostics for embedding requests. */
+  embeddingExecution?: EmbeddingExecutionOptions;
   /** Receives a safe, value-free reason when a persisted index is discarded. */
   onDiagnostic?: (message: string) => void;
   maxEmbeddingBatchSize?: number;
@@ -520,6 +523,7 @@ export async function refreshRepositoryIndex(
       signal: input.signal,
       beforeEmbeddingRequest: input.beforeEmbeddingRequest,
       onEmbeddingRequest: input.onEmbeddingRequest,
+      embeddingExecution: input.embeddingExecution,
       maxEmbeddingBatchSize: input.maxEmbeddingBatchSize,
       seedVectors,
       checkpoint,

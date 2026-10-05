@@ -33,6 +33,11 @@ export type ReviewConfig = {
   requestTimeoutMs: number;
   totalTimeoutMs: number;
   maxAttempts: number;
+  /**
+   * Retry bounds for embedding requests, independent of the review model's
+   * `maxAttempts`. Absent means the defaults; loadConfig always sets it.
+   */
+  embeddingRetry?: { maxAttempts: number; baseDelayMs: number };
   retrievalCandidates: number;
   retrievalTopK: number;
   relevanceThreshold: number;
@@ -44,6 +49,24 @@ function positiveInt(name: string, fallback: number): number {
   const value = Number(raw);
   if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0)
     throw new Error(`${name} must be a positive finite integer`);
+  return value;
+}
+function boundedInt(
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (
+    raw.trim() === "" ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max
+  )
+    throw new Error(`${name} must be an integer from ${min} to ${max}`);
   return value;
 }
 function reviewProvider(): ReviewProviderName {
@@ -105,6 +128,15 @@ export function loadConfig(options: ConfigOptions): ReviewConfig {
     requestTimeoutMs: positiveInt("AI_REVIEW_REQUEST_TIMEOUT_MS", 60000),
     totalTimeoutMs: positiveInt("AI_REVIEW_TOTAL_TIMEOUT_MS", 600000),
     maxAttempts: positiveInt("AI_REVIEW_MAX_ATTEMPTS", 3),
+    embeddingRetry: {
+      maxAttempts: boundedInt("AI_REVIEW_EMBEDDING_MAX_ATTEMPTS", 3, 1, 10),
+      baseDelayMs: boundedInt(
+        "AI_REVIEW_EMBEDDING_RETRY_BASE_MS",
+        250,
+        0,
+        10_000,
+      ),
+    },
     retrievalCandidates: positiveInt("AI_REVIEW_RETRIEVAL_CANDIDATES", 20),
     retrievalTopK: positiveInt("AI_REVIEW_RETRIEVAL_TOP_K", 5),
     relevanceThreshold: threshold,

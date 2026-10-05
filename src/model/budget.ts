@@ -43,6 +43,11 @@ export class ExternalRequestBudget {
     return this.used;
   }
 
+  /** Calls that may still be reserved. */
+  get remaining(): number {
+    return Math.max(0, this.limit - this.used);
+  }
+
   consumedBy(kind: ExternalRequestKind): number {
     return this.byKind[kind];
   }

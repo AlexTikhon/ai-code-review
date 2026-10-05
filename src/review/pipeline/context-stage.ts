@@ -10,6 +10,8 @@ import {
 } from "../../retrieval/prepared-index.js";
 import type { LoadedIgnore } from "../ignore.js";
 import type { ReviewError, ReviewResult, ReviewSource } from "../types.js";
+import { embeddingExecutionFor } from "./embedding-execution.js";
+import { contextFailure } from "./analysis-errors.js";
 import { errorMessage } from "./result.js";
 import type { PipelineContext } from "./types.js";
 
@@ -65,6 +67,7 @@ export async function contextStage(
       embedding: hybrid && !ctx.request.dryRun ? embedding : undefined,
       signal: ctx.signal,
       beforeEmbeddingRequest: () => ctx.budget.reserve("embedding"),
+      embeddingExecution: embeddingExecutionFor(ctx),
       onDiagnostic: (message) => diagnostics.push(message),
       // Counts and reasons only: never vectors, prompts or source text.
       onCheckpoint: ({ type, ...data }) =>
@@ -116,6 +119,7 @@ export async function contextStage(
         vectorsReused: stats.vectorsReused,
         vectorsCreated: stats.vectorsCreated,
         embeddingRequests: stats.embeddingRequests,
+        embeddingRetries: stats.embeddingRetries,
         vectorsFromCheckpoint: stats.vectorsFromCheckpoint,
         embeddingRequestsAvoided: stats.embeddingRequestsAvoided,
         checkpointSaves: stats.checkpointSaves,
@@ -147,7 +151,7 @@ export async function contextStage(
         selected: [],
         message,
       },
-      errors: [{ stage: "index", message, fatal: false }],
+      errors: [contextFailure(error, message)],
     };
   }
 }

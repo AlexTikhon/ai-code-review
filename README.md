@@ -144,6 +144,13 @@ AI_REVIEW_RELEVANCE_THRESHOLD=0.05
 
 `AI_REVIEW_MAX_REQUESTS` is an actual external-call allowance shared atomically by model attempts (including retries), indexing embedding batches, and query embeddings. Logical review work, model attempts, embedding calls, current-run provider usage, estimates, and cache hits are reported separately. Cache hits do not count as current-run provider usage.
 
+Embedding requests (hybrid retrieval only) are retried independently of the review model, because a transient embedding failure would otherwise abort indexing and force a rerun. Rate limits, `5xx`, timeouts and network errors are retried up to 3 attempts with jittered backoff (honoring `Retry-After`, at most 10 s); authentication, invalid-request, unknown-model and malformed-response failures are not. Every attempt, retries included, counts against `AI_REVIEW_MAX_REQUESTS`, and vectors from batches that already succeeded are kept in the embedding checkpoint if a later batch fails. Failures are reported with `EMBEDDING_*` codes (for example `EMBEDDING_RATE_LIMIT`), distinct from `MODEL_*`. The defaults need no tuning; both knobs are optional:
+
+```env
+AI_REVIEW_EMBEDDING_MAX_ATTEMPTS=3      # 1-10
+AI_REVIEW_EMBEDDING_RETRY_BASE_MS=250   # 0-10000
+```
+
 Token estimates use a conservative one-token-per-UTF-8-byte fallback; they are not tokenizer-exact. The system/user messages, structured-output schema and message-envelope overhead, bounded metadata, diff, selected context, and output reservation must fit before the provider boundary. Provider-reported token usage is recorded only for calls made in the current run.
 
 See [architecture decisions](docs/ARCHITECTURE.md) and [evaluation details](docs/EVALUATION.md).
