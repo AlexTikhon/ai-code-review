@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { assertSafeCachePath, cacheDirectory } from "../cache/paths.js";
 import {
   inspectContainedRegularFile,
   inspectSensitiveContent,
@@ -54,7 +55,7 @@ const INDEXABLE =
 const MAX_FILE_BYTES = 1024 * 1024;
 
 export function indexPath(root: string, cacheDirName: string): string {
-  return join(root, cacheDirName, "repository-index.json");
+  return join(cacheDirectory(root, cacheDirName), "repository-index.json");
 }
 
 /**
@@ -160,6 +161,7 @@ async function readIndexOnce(
 }> {
   let text: string;
   try {
+    await assertSafeCachePath(path);
     text = await readFile(path, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
@@ -309,6 +311,7 @@ export type RepositoryIndexInput = {
   revision: string;
   /** If supplied, all names and bytes are read from this immutable Git tree. */
   gitRevision?: string;
+  /** Namespace label under the current user's OS cache; not a repository path. */
   cacheDirName: string;
   maxChunkTokens: number;
   ignorePolicy: LoadedIgnore;
@@ -543,6 +546,7 @@ export async function refreshRepositoryIndex(
       index,
       previous: previous ? persistedRefsOf(previous) : undefined,
       ops: input.fileOps,
+      signal: input.signal,
     });
     const durationMs = performance.now() - publishStarted;
     input.onStoreEvent?.({

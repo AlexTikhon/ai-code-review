@@ -41,10 +41,11 @@ export function validateFindings(
         item.path !== filename ||
         item.startLine <= 0 ||
         item.endLine <= 0 ||
-        Array.from(
-          { length: item.endLine - item.startLine + 1 },
-          (_, index) => item.startLine + index,
-        ).some((line) => !changed.has(line))
+        !Number.isSafeInteger(item.startLine) ||
+        !Number.isSafeInteger(item.endLine) ||
+        item.endLine < item.startLine ||
+        item.endLine - item.startLine + 1 > changed.size ||
+        !isSuppliedRange(changed, item.startLine, item.endLine)
       )
         valid = false;
       return {
@@ -71,7 +72,18 @@ export function validateFindings(
       suggestion: raw.suggestion ?? undefined,
     });
   }
-  return deduplicateFindings(findings);
+  // Preserve cardinality for invalid-evidence accounting. Deduplicate only
+  // after the caller knows how many input findings actually validated.
+  return findings;
+}
+function isSuppliedRange(
+  changed: ReadonlySet<number>,
+  start: number,
+  end: number,
+): boolean {
+  for (let line = start; line <= end; line++)
+    if (!changed.has(line)) return false;
+  return true;
 }
 export function deduplicateFindings(
   findings: ReviewerFinding[],

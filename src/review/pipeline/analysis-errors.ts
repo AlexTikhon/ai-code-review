@@ -16,7 +16,7 @@ export type SegmentStatus =
   | "model_failure"
   /** Cancelled by the total deadline or the caller. */
   | "aborted"
-  /** Anything else: request budget, prompt assembly, retrieval, cache I/O. */
+  /** Anything else: request budget, prompt assembly, or retrieval. */
   | "internal_failure";
 
 export type SegmentFailure = {

@@ -79,6 +79,17 @@ export async function getGithubReviewSource(
     getPullRequestFiles(owner, repo, number, pr.changed_files, request, signal),
     trustedIgnore(owner, repo, pr.base.sha, request, signal),
   ]);
+  // File pagination follows a mutable PR. A count alone cannot detect a push.
+  const confirmed = await getPullRequest(owner, repo, number, request, signal);
+  if (
+    confirmed.base.sha !== pr.base.sha ||
+    confirmed.head.sha !== pr.head.sha ||
+    confirmed.changed_files !== pr.changed_files ||
+    new Set(files.map((file) => file.filename)).size !== files.length
+  )
+    throw new Error(
+      "Pull request changed during collection or returned duplicate files; retry against a stable revision",
+    );
   return {
     mode: "pr",
     title: pr.title,

@@ -1,4 +1,5 @@
 import "./args.test.js";
+import "./review-boundaries.test.js";
 import "./classifier.test.js";
 import "./ignore.test.js";
 import "./patch.test.js";

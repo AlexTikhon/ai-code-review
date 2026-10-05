@@ -12,7 +12,7 @@ import type { EmbeddingAdapter } from "../../retrieval/embeddings.js";
 import type { PreparedRepositoryIndex } from "../../retrieval/prepared-index.js";
 import { retrieveContext } from "../../retrieval/retrieve.js";
 import type { RetrievalCandidate } from "../../retrieval/types.js";
-import { validateFindings } from "../findings.js";
+import { deduplicateFindings, validateFindings } from "../findings.js";
 import type {
   ContextUse,
   PatchSegment,
@@ -217,12 +217,21 @@ async function reviewSegment(
           selectedContext,
           usage,
         };
-      if (root)
-        await writeReviewCache(root, config.cacheDirName, key, modelResult);
+      if (root) {
+        try {
+          await writeReviewCache(root, config.cacheDirName, key, modelResult);
+        } catch {
+          emitEvent(ctx.events, ctx.runId, "cache", "warning", {
+            filename: file.filename,
+            message:
+              "Review cache write failed; validated findings were retained",
+          });
+        }
+      }
     }
     return {
       status: "success",
-      findings: validated!,
+      findings: deduplicateFindings(validated!),
       abstention: modelResult.response.abstained
         ? {
             filename: file.filename,

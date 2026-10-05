@@ -1,3 +1,4 @@
+import { cacheDirectory } from "../src/cache/paths.js";
 import assert from "node:assert/strict";
 import { POLICY_VERSION } from "../src/review/types.js";
 import {
@@ -93,7 +94,7 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 async function writeIndexFile(dir: string, contents: string): Promise<string> {
   const path = indexPath(dir, ".cache");
-  await mkdir(join(dir, ".cache"), { recursive: true });
+  await mkdir(cacheDirectory(dir, ".cache"), { recursive: true, mode: 0o700 });
   await writeFile(path, contents);
   return path;
 }
@@ -251,13 +252,16 @@ unitTest(
     assert.equal((await readIndex(path)).status, "valid");
     // Atomic publication leaves no temporary files behind: the manifest and
     // one generation (metadata only: there are no vectors without embeddings).
-    assert.deepEqual(await readdir(join(root, ".cache")), [
+    assert.deepEqual(await readdir(cacheDirectory(root, ".cache")), [
       "repository-index.generations",
       "repository-index.json",
     ]);
     assert.equal(
-      (await readdir(join(root, ".cache", "repository-index.generations")))
-        .length,
+      (
+        await readdir(
+          join(cacheDirectory(root, ".cache"), "repository-index.generations"),
+        )
+      ).length,
       1,
     );
   },

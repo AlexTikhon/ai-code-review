@@ -10,6 +10,7 @@ import { reviewResponseSchema } from "../schemas/review.schema.js";
 import { z } from "zod";
 import { POLICY_VERSION, PROMPT_VERSION } from "../review/types.js";
 import { writeFileAtomic } from "./atomic-write.js";
+import { assertSafeCachePath, cacheDirectory } from "./paths.js";
 
 /**
  * Cache identity = exact request + the provider contract that answers it.
@@ -39,6 +40,8 @@ export async function readReviewCache(
   key: string,
 ): Promise<ModelResult | undefined> {
   try {
+    const path = join(cacheDirectory(root, cacheDir), "reviews", `${key}.json`);
+    await assertSafeCachePath(path);
     const parsed = z
       .object({
         response: reviewResponseSchema,
@@ -48,14 +51,7 @@ export async function readReviewCache(
           actual: z.boolean(),
         }),
       })
-      .safeParse(
-        JSON.parse(
-          await readFile(
-            join(root, cacheDir, "reviews", `${key}.json`),
-            "utf8",
-          ),
-        ),
-      );
+      .safeParse(JSON.parse(await readFile(path, "utf8")));
     return parsed.success ? parsed.data : undefined;
   } catch {
     // Missing, unreadable, or malformed entries are plain cache misses.
@@ -69,7 +65,7 @@ export async function writeReviewCache(
   value: ModelResult,
 ): Promise<void> {
   await writeFileAtomic(
-    join(root, cacheDir, "reviews", `${key}.json`),
+    join(cacheDirectory(root, cacheDir), "reviews", `${key}.json`),
     JSON.stringify(value),
   );
 }

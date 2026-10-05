@@ -41,6 +41,7 @@ export type ReviewConfig = {
   retrievalCandidates: number;
   retrievalTopK: number;
   relevanceThreshold: number;
+  /** Cache namespace label; never a path inside the reviewed repository. */
   cacheDirName: string;
 };
 function positiveInt(name: string, fallback: number): number {

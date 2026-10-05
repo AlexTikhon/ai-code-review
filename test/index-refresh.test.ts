@@ -1,3 +1,4 @@
+import { cacheDirectory } from "../src/cache/paths.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
@@ -311,7 +312,7 @@ unitTest(
     const { adapter, state } = countingEmbedding();
     await refreshRepositoryIndex(await options(root, { embedding: adapter }));
     const path = indexPath(root, ".cache");
-    const before = await snapshotFiles(join(root, ".cache"));
+    const before = await snapshotFiles(cacheDirectory(root, ".cache"));
     await put(root, "src/m2.ts", "export function work2() { return 222; }\n");
     state.fail = true;
     await assert.rejects(
@@ -324,7 +325,10 @@ unitTest(
       /provider down/,
     );
     // Manifest, metadata and vector blob: not one byte differs, nothing is added.
-    assert.deepEqual(await snapshotFiles(join(root, ".cache")), before);
+    assert.deepEqual(
+      await snapshotFiles(cacheDirectory(root, ".cache")),
+      before,
+    );
     assert.equal(path, indexPath(root, ".cache"));
     // Recovery: the next successful run builds on the intact previous index.
     state.fail = false;

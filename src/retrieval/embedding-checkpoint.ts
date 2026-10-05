@@ -2,6 +2,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { writeFileAtomic } from "../cache/atomic-write.js";
+import { assertSafeCachePath, cacheDirectory } from "../cache/paths.js";
 import { vectorSchema } from "./index-schema.js";
 import type { StoredVector } from "./types.js";
 
@@ -9,7 +10,7 @@ import type { StoredVector } from "./types.js";
 export const CHECKPOINT_SCHEMA_VERSION = 1;
 
 export function checkpointPath(root: string, cacheDirName: string): string {
-  return join(root, cacheDirName, "embedding-checkpoint.json");
+  return join(cacheDirectory(root, cacheDirName), "embedding-checkpoint.json");
 }
 
 /**
@@ -68,6 +69,7 @@ export class FileEmbeddingCheckpointStore implements EmbeddingCheckpointStore {
   async load(): Promise<CheckpointLoad> {
     let text: string;
     try {
+      await assertSafeCachePath(this.path);
       text = await readFile(this.path, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT")
@@ -115,6 +117,7 @@ export class FileEmbeddingCheckpointStore implements EmbeddingCheckpointStore {
   }
 
   async clear(): Promise<void> {
+    await assertSafeCachePath(this.path);
     await rm(this.path, { force: true });
   }
 }

@@ -1,3 +1,4 @@
+import { cacheDirectory } from "../src/cache/paths.js";
 import assert from "node:assert/strict";
 import { readReviewCache, reviewCacheKey } from "../src/cache/review-cache.js";
 import { unitTest } from "./helpers.js";
@@ -50,8 +51,8 @@ unitTest(
 unitTest("malformed cached model responses are ignored", async () => {
   const root = await mkdtemp(join(tmpdir(), "acr-review-cache-"));
   const key = "malformed";
-  const directory = join(root, ".cache", "reviews");
-  await mkdir(directory, { recursive: true });
+  const directory = join(cacheDirectory(root, ".cache"), "reviews");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   await writeFile(
     join(directory, `${key}.json`),
     JSON.stringify({

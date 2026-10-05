@@ -63,7 +63,7 @@ function parsePatchLines(patch: string): ParsedLine[] {
     }
     if (oldLine === undefined || newLine === undefined)
       return { text, complete: true };
-    if (text.startsWith("+") && !text.startsWith("+++")) {
+    if (text.startsWith("+")) {
       const parsed = {
         text,
         kind: "addition" as const,
@@ -73,7 +73,7 @@ function parsePatchLines(patch: string): ParsedLine[] {
       newLine++;
       return parsed;
     }
-    if (text.startsWith("-") && !text.startsWith("---")) {
+    if (text.startsWith("-")) {
       const parsed = {
         text,
         kind: "deletion" as const,

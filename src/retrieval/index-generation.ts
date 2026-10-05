@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
+import { open, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { EMBEDDING_INPUT_HASH_VERSION } from "./embedding-keys.js";
+import {
+  assertSafeCachePath,
+  ensureSafeCacheDirectory,
+} from "../cache/paths.js";
+import { withPublicationLock } from "../cache/publication-lock.js";
 import {
   parseManifest,
   parsePersistedMetadata,
@@ -82,9 +87,10 @@ export interface GenerationFileOps {
 
 export const nodeFileOps: GenerationFileOps = {
   async mkdir(path) {
-    await mkdir(path, { recursive: true });
+    await ensureSafeCacheDirectory(path);
   },
   async create(path) {
+    await assertSafeCachePath(path);
     const handle = await open(path, "wx", 0o600);
     return {
       async write(bytes) {
@@ -102,10 +108,18 @@ export const nodeFileOps: GenerationFileOps = {
       close: () => handle.close(),
     };
   },
-  rename,
-  remove: (path) => rm(path, { force: true }),
+  async rename(from, to) {
+    await assertSafeCachePath(from);
+    await assertSafeCachePath(to);
+    await rename(from, to);
+  },
+  async remove(path) {
+    await assertSafeCachePath(path);
+    await rm(path, { force: true });
+  },
   async list(path) {
     try {
+      await assertSafeCachePath(path);
       return await readdir(path);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
@@ -113,6 +127,7 @@ export const nodeFileOps: GenerationFileOps = {
     }
   },
   async stat(path) {
+    await assertSafeCachePath(path);
     const { size, mtimeMs } = await stat(path);
     return { size, mtimeMs };
   },
@@ -168,6 +183,7 @@ export type PublishInput = {
   previous?: PersistedRefs;
   ops?: GenerationFileOps;
   now?: () => number;
+  signal?: AbortSignal;
 };
 
 export type PublishResult = {
@@ -306,6 +322,14 @@ function buildMetadata(
 export async function publishIndex(
   input: PublishInput,
 ): Promise<PublishResult> {
+  return withPublicationLock(
+    input.manifestPath,
+    () => publishLockedIndex(input),
+    input.signal,
+  );
+}
+
+async function publishLockedIndex(input: PublishInput): Promise<PublishResult> {
   const { manifestPath, index } = input;
   const ops = input.ops ?? nodeFileOps;
   const now = input.now ?? Date.now;
@@ -510,6 +534,7 @@ async function readWholeFile(
 > {
   let handle;
   try {
+    await assertSafeCachePath(path);
     handle = await open(path, "r");
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT"

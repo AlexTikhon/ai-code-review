@@ -9,7 +9,7 @@ This is an engineering baseline, not a claim that model findings are correct or 
 The source-neutral pipeline is `ingest → filter/policy → repository context → analyze → finalize`; each stage is a separate module described in [architecture decisions](docs/ARCHITECTURE.md). The repository index is updated incrementally: unchanged files reuse their chunks and embeddings, and only changed files are re-read and re-chunked. A corrupt or incompatible index cache is validated, rebuilt from source, and reported in `context.message` rather than trusted. Embedding vectors are stored in a compact binary file next to a small JSON metadata file, and an index is published as a complete generation (the manifest is replaced last), so a crash can never expose a half-written index; an index in the previous all-JSON format is upgraded in place without re-embedding. Paid embedding work survives a failed or cancelled run in a separate checkpoint (the canonical index is still only ever replaced whole), so a retry requests just the missing vectors. `npm run bench` prints a local lexical-retrieval, exact semantic-search, persistence and incremental-index benchmark (`npm run bench:persistence` runs the full persistence comparison up to 100,000 vectors).
 
 - Local mode collects tracked and untracked changes relative to `HEAD` or the merge-base of `--base`. Git output is NUL-delimited and external diff/textconv helpers are disabled.
-- PR mode fetches immutable base/head SHAs and verifies the number of files returned against GitHub's `changed_files`. The `.ai-reviewer-ignore` policy is read from the trusted base SHA.
+- PR mode fetches immutable base/head SHAs and verifies the number of files returned against GitHub's `changed_files`, rejects duplicate paths, and rechecks base/head SHAs after pagination. A concurrent PR update fails collection instead of mixing revisions. The `.ai-reviewer-ignore` policy is read from the trusted base SHA.
 - `--context diff` sends only bounded diff segments.
 - `--context lexical` (default) indexes the local checkout and combines keyword, symbol, and import lookup.
 - `--context hybrid` adds OpenAI embeddings when separately permitted. If embeddings are not permitted it reports that semantic retrieval was unavailable and uses lexical/symbol evidence.
@@ -46,6 +46,8 @@ node dist/src/cli.js --local --dry-run --format json
 ```
 
 The manifest lists proposed files, omissions, destinations, and estimated requests/tokens without raw code or secrets and makes zero model/embedding calls.
+
+Caches live in a repository-specific namespace under the current user's OS cache (Windows: `%USERPROFILE%/AppData/Local/ai-code-reviewer`; macOS: `~/Library/Caches/ai-code-reviewer`; Linux: `~/.cache/ai-code-reviewer`). Repository-local caches are ignored and rebuilt, and cache path symlinks/junctions are rejected. `--index` reports the exact manifest path. Index publication and cleanup are serialized across CLI processes.
 
 ## Commands
 

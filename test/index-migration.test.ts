@@ -1,3 +1,4 @@
+import { cacheDirectory } from "../src/cache/paths.js";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -49,8 +50,8 @@ async function legacyFixture(files = 10): Promise<Fixture> {
     await indexOptions(root, { embedding: adapter }),
   );
   const path = indexPath(root, ".cache");
-  await rm(join(root, ".cache"), { recursive: true, force: true });
-  await mkdir(join(root, ".cache"), { recursive: true });
+  await rm(cacheDirectory(root, ".cache"), { recursive: true, force: true });
+  await mkdir(cacheDirectory(root, ".cache"), { recursive: true, mode: 0o700 });
   const legacyBytes = JSON.stringify(schema2Document(index));
   await writeFile(path, legacyBytes);
   return { root, path, original: index, legacyBytes, adapter };
@@ -244,8 +245,11 @@ unitTest(
     );
     assert.equal(index.vectors.segments.length, 2);
     const path = indexPath(root, ".cache");
-    await rm(join(root, ".cache"), { recursive: true, force: true });
-    await mkdir(join(root, ".cache"), { recursive: true });
+    await rm(cacheDirectory(root, ".cache"), { recursive: true, force: true });
+    await mkdir(cacheDirectory(root, ".cache"), {
+      recursive: true,
+      mode: 0o700,
+    });
     await writeFile(path, JSON.stringify(schema2Document(index)));
     const probe = probedEmbedding();
     const migrated = await refreshRepositoryIndex(

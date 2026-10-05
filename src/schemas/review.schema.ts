@@ -11,8 +11,8 @@ export const findingConfidenceSchema = z.enum(["low", "medium", "high"]);
 export const rawEvidenceSchema = z
   .object({
     path: z.string().min(1),
-    startLine: z.number().int().positive(),
-    endLine: z.number().int().positive(),
+    startLine: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    endLine: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     contextId: z.string().min(1).nullable().optional(),
   })
   .refine(
