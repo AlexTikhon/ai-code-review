@@ -12,6 +12,7 @@ import type { EmbeddingAdapter } from "../../retrieval/embeddings.js";
 import type { PreparedRepositoryIndex } from "../../retrieval/prepared-index.js";
 import { retrieveContext } from "../../retrieval/retrieve.js";
 import type { RetrievalCandidate } from "../../retrieval/types.js";
+import { contextRepositoryId } from "../context-identity.js";
 import { deduplicateFindings, validateFindings } from "../findings.js";
 import type {
   ContextUse,
@@ -86,7 +87,7 @@ async function reviewSegment(
       const retrievalStarted = ctx.now();
       candidates = await retrieveContext({
         index: job.prepared,
-        repositoryId: source.repositoryId,
+        repositoryId: contextRepositoryId(source),
         revision: source.snapshotId,
         query: `${file.filename}\n${segment.text}`,
         changedPath: file.filename,

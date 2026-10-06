@@ -131,6 +131,7 @@ export async function executeReviewPipeline(
     signal: deadline.signal,
     deadlineAt: started + config.totalTimeoutMs,
     embeddingSeams: runtime.embeddingExecution,
+    githubSeams: runtime.github,
     budget: new ExternalRequestBudget(config.maxRequests, deadline.signal),
   };
   let result: ReviewResult | undefined;

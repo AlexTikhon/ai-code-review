@@ -1,5 +1,7 @@
 import { emitEvent } from "../../observability/events.js";
 import { isMandatorySensitivePath } from "../../privacy/policy.js";
+import { localContextIdentity } from "../context-identity.js";
+import { createGithubRequester } from "../../review-sources/github/client.js";
 import { getGithubReviewSource } from "../../review-sources/github/pulls.js";
 import {
   getLocalDiff,
@@ -11,7 +13,8 @@ import {
   type LoadedIgnore,
 } from "../ignore.js";
 import type { ReviewError, ReviewSource } from "../types.js";
-import { errorMessage } from "./result.js";
+import { ingestFailure } from "./ingest-errors.js";
+import { sourceEventSink } from "./source-events.js";
 import type { PipelineContext } from "./types.js";
 
 export type IngestOutcome =
@@ -28,18 +31,30 @@ async function collectSource(
 ): Promise<{ source: ReviewSource; localPolicy?: LoadedIgnore }> {
   const { target } = ctx.request;
   if (target.kind === "pull-request") {
+    // GitHub reads are operational source calls: they never touch the AI
+    // request budget; bounds come from the retry policy and the total deadline.
+    const github = createGithubRequester({
+      ...ctx.githubSeams,
+      requestTimeoutMs: ctx.config.requestTimeoutMs,
+      remainingMs: () => ctx.deadlineAt - ctx.now(),
+      onEvent: sourceEventSink(ctx, "github"),
+    });
     const source = await getGithubReviewSource(
       target.owner,
       target.repo,
       target.pullNumber,
-      undefined,
+      github,
       ctx.signal,
     );
-    if (target.localRepoPath)
-      source.repositoryRoot = await resolveRepositoryRoot(
+    if (target.localRepoPath) {
+      // `owner/repo` stays the source's identity; retrieval is keyed by the checkout.
+      const root = await resolveRepositoryRoot(
         target.localRepoPath,
         ctx.signal,
       );
+      source.repositoryRoot = root;
+      source.contextIdentity = localContextIdentity(root);
+    }
     return { source };
   }
   const root = await resolveRepositoryRoot(target.localRepoPath, ctx.signal);
@@ -74,13 +89,19 @@ export async function ingestStage(
     });
     return { ok: true, ...collected };
   } catch (error) {
+    const failure = ingestFailure(error, ctx.signal.aborted);
     emitEvent(ctx.events, ctx.runId, "ingest", "error", {
       durationMs: ctx.now() - started,
-      message: errorMessage(error),
+      message: failure.message,
+      ...(failure.code
+        ? {
+            data: {
+              code: failure.code,
+              retryable: failure.retryable ?? false,
+            },
+          }
+        : {}),
     });
-    return {
-      ok: false,
-      error: { stage: "ingest", message: errorMessage(error), fatal: true },
-    };
+    return { ok: false, error: failure };
   }
 }

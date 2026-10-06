@@ -1,10 +1,15 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { assertContainedRegularFile } from "../../privacy/policy.js";
+import {
+  localContextIdentity,
+  localRepositoryId,
+} from "../../review/context-identity.js";
 import type { ReviewSource, SourceFile } from "../../review/types.js";
+import { SourceError, sourceAbortedError } from "../errors.js";
 
 const execFileAsync = promisify(execFile);
 type NameStatusEntry = {
@@ -17,7 +22,41 @@ export type LocalCollectionOptions = {
   signal?: AbortSignal;
 };
 
-async function runGit(
+/**
+ * Translate an execFile failure into a SourceError with a short, fixed message.
+ * Git's stderr can name paths and file contents, so it is never kept.
+ */
+export function classifyGitFailure(
+  error: unknown,
+  command: string,
+  signal?: AbortSignal,
+): SourceError {
+  if (error instanceof SourceError) return error;
+  const { name, code } = (error ?? {}) as { name?: unknown; code?: unknown };
+  if (signal?.aborted || name === "AbortError" || code === "ABORT_ERR")
+    return sourceAbortedError("git", "Git command was cancelled");
+  if (code === "ENOENT" || code === "EACCES")
+    return new SourceError({
+      kind: "configuration",
+      source: "git",
+      message: "Git could not be started; is it installed and on PATH?",
+      code: "git_unavailable",
+    });
+  if (code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+    return new SourceError({
+      kind: "unknown",
+      source: "git",
+      message: `git ${command} produced more output than the limit`,
+      code: "git_output_too_large",
+    });
+  return new SourceError({
+    kind: "unknown",
+    source: "git",
+    message: `git ${command} failed${typeof code === "number" ? ` (exit ${code})` : ""}`,
+    code: "git_command_failed",
+  });
+}
+async function runGitRaw(
   args: string[],
   cwd: string,
   signal?: AbortSignal,
@@ -31,24 +70,47 @@ async function runGit(
   });
   return stdout;
 }
+async function runGit(
+  args: string[],
+  cwd: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    return await runGitRaw(args, cwd, signal);
+  } catch (error) {
+    throw classifyGitFailure(error, args[0] ?? "command", signal);
+  }
+}
+const notARepository = (path: string) =>
+  new SourceError({
+    kind: "configuration",
+    source: "git",
+    message: `Not a readable Git repository: ${path}`,
+    code: "not_a_repository",
+  });
 export async function resolveRepositoryRoot(
   repoPath = process.cwd(),
   signal?: AbortSignal,
 ): Promise<string> {
+  const directory = resolve(repoPath);
+  try {
+    if (!(await stat(directory)).isDirectory())
+      throw new Error("not a directory");
+  } catch {
+    throw notARepository(directory);
+  }
   try {
     return await realpath(
       (
-        await runGit(
-          ["rev-parse", "--show-toplevel"],
-          resolve(repoPath),
-          signal,
-        )
+        await runGitRaw(["rev-parse", "--show-toplevel"], directory, signal)
       ).trim(),
     );
   } catch (error) {
-    throw new Error(
-      `Not a readable Git repository: ${resolve(repoPath)} (${error instanceof Error ? error.message : String(error)})`,
-    );
+    const failure = classifyGitFailure(error, "rev-parse", signal);
+    // A plain non-zero exit of `rev-parse --show-toplevel` means no work tree here.
+    throw failure.code === "git_command_failed"
+      ? notARepository(directory)
+      : failure;
   }
 }
 function mapStatus(raw: string): string {
@@ -281,10 +343,43 @@ async function baseRevision(
   signal?: AbortSignal,
 ): Promise<string> {
   if (!base) return "HEAD";
-  const mergeBase = (
-    await runGit(["merge-base", base, "HEAD"], root, signal)
-  ).trim();
-  if (!mergeBase) throw new Error(`Could not resolve merge-base for ${base}`);
+  const shown = JSON.stringify(base.slice(0, 80));
+  const invalid = () =>
+    new SourceError({
+      kind: "configuration",
+      source: "git",
+      message: `Base ref ${shown} does not name a commit`,
+      code: "invalid_ref",
+    });
+  const noMergeBase = () =>
+    new SourceError({
+      kind: "configuration",
+      source: "git",
+      message: `Base ref ${shown} has no merge-base with HEAD`,
+      code: "no_merge_base",
+    });
+  // A ref that looks like an option must never reach Git's argument parser.
+  if (base.startsWith("-") || !base.trim()) throw invalid();
+  try {
+    await runGitRaw(
+      ["rev-parse", "--verify", "--quiet", `${base}^{commit}`],
+      root,
+      signal,
+    );
+  } catch (error) {
+    const failure = classifyGitFailure(error, "rev-parse", signal);
+    throw failure.code === "git_command_failed" ? invalid() : failure;
+  }
+  let mergeBase: string;
+  try {
+    mergeBase = (
+      await runGitRaw(["merge-base", base, "HEAD"], root, signal)
+    ).trim();
+  } catch (error) {
+    const failure = classifyGitFailure(error, "merge-base", signal);
+    throw failure.code === "git_command_failed" ? noMergeBase() : failure;
+  }
+  if (!mergeBase) throw noMergeBase();
   return mergeBase;
 }
 
@@ -325,8 +420,9 @@ export async function getLocalDiff(
     description: base
       ? `Working tree changes relative to merge-base(${base}, HEAD).`
       : "Tracked and untracked working tree changes relative to HEAD.",
-    repositoryId: createHash("sha256").update(root.toLowerCase()).digest("hex"),
+    repositoryId: localRepositoryId(root),
     repositoryRoot: root,
+    contextIdentity: localContextIdentity(root),
     baseRevision: immutableBase.trim(),
     headRevision: head.trim(),
     snapshotId,

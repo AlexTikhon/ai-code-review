@@ -8,6 +8,7 @@ import {
   prepareRepositoryIndex,
   type PreparedRepositoryIndex,
 } from "../../retrieval/prepared-index.js";
+import { contextRepositoryId } from "../context-identity.js";
 import type { LoadedIgnore } from "../ignore.js";
 import type { ReviewError, ReviewResult, ReviewSource } from "../types.js";
 import { embeddingExecutionFor } from "./embedding-execution.js";
@@ -58,7 +59,7 @@ export async function contextStage(
   try {
     const { index, stats, loaded } = await refreshRepositoryIndex({
       root: source.repositoryRoot,
-      repositoryId: source.repositoryId,
+      repositoryId: contextRepositoryId(source),
       revision: source.snapshotId,
       gitRevision: source.mode === "pr" ? source.headRevision : undefined,
       cacheDirName: ctx.config.cacheDirName,

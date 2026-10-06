@@ -33,7 +33,11 @@ import {
   type GenerationFileOps,
   type LoadInfo,
 } from "./index-generation.js";
-import { assessIndexCompatibility } from "./index-compat.js";
+import {
+  adoptRepositoryIdentity,
+  assessIndexCompatibility,
+  isSourceScopedRepositoryId,
+} from "./index-compat.js";
 import { migrateSchemaV2, salvageSchemaV1Vectors } from "./index-legacy.js";
 import { parseManifest } from "./index-schema.js";
 import {
@@ -111,6 +115,8 @@ export type IndexStoreEvent =
       zeroCopy: boolean;
       durationMs: number;
     }
+  /** An index built under a source-scoped identity was re-labelled for this checkout. */
+  | { type: "identity_migrated"; chunks: number }
   | { type: "migration_started"; fromSchemaVersion: number; vectors: number }
   | {
       type: "migration_completed";
@@ -438,12 +444,32 @@ export async function refreshRepositoryIndex(
   input.signal?.throwIfAborted();
   const path = indexPath(input.root, input.cacheDirName);
   const loadStarted = performance.now();
-  const loaded = await readIndex(path, {
+  // The repository identity is judged below rather than inside readIndex, so an
+  // index written under the old source-scoped identity can be adopted, not lost.
+  let loaded = await readIndex(path, {
     chunkerVersion: CHUNKER_VERSION,
     maxChunkTokens: input.maxChunkTokens,
     policyVersion: POLICY_VERSION,
-    repositoryId: input.repositoryId,
   });
+  let adoptedChunks: number | undefined;
+  if (
+    loaded.status === "valid" &&
+    loaded.index.repositoryId !== input.repositoryId
+  ) {
+    if (isSourceScopedRepositoryId(loaded.index.repositoryId)) {
+      // This cache namespace is derived from this checkout's path, so the bytes
+      // are this checkout's; only the label on them is from the old scheme.
+      adoptedChunks = loaded.index.chunks.length;
+      loaded = {
+        ...loaded,
+        index: adoptRepositoryIdentity(loaded.index, input.repositoryId),
+      };
+    } else
+      loaded = {
+        status: "incompatible",
+        reason: "repository identity differs",
+      };
+  }
   if (loaded.status === "corrupt")
     input.onDiagnostic?.(
       `Persisted repository index was unusable (${loaded.reason}); rebuilt from source.`,
@@ -461,6 +487,11 @@ export async function refreshRepositoryIndex(
   const migratedFrom =
     loaded.status === "valid" ? loaded.migratedFromSchema : undefined;
   if (loaded.status === "valid") {
+    if (adoptedChunks !== undefined)
+      input.onStoreEvent?.({
+        type: "identity_migrated",
+        chunks: adoptedChunks,
+      });
     if (loaded.info)
       input.onStoreEvent?.({
         type: "loaded",

@@ -72,6 +72,28 @@ export function rebindChunk(
   };
 }
 
+/**
+ * The same chunk under another repository identity. Like `rebindChunk`, only the
+ * identity-derived id changes; the path, signature and content are untouched,
+ * so the chunk's embedding input hash (and therefore its vector) is unaffected.
+ */
+export function rebindChunkRepository(
+  chunk: ContextChunk,
+  repositoryId: string,
+): ContextChunk {
+  if (chunk.repositoryId === repositoryId) return chunk;
+  return {
+    ...chunk,
+    repositoryId,
+    id: chunkId(
+      { ...chunk, repositoryId },
+      chunk.startLine,
+      chunk.endLine,
+      chunk.contentHash,
+    ),
+  };
+}
+
 function makeChunk(
   base: ChunkBase,
   content: string,

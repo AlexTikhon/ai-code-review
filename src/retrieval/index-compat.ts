@@ -1,3 +1,4 @@
+import { rebindChunkRepository } from "./chunker.js";
 import type { RepositoryIndex } from "./types.js";
 
 /** What the current run needs from a persisted index before it may reuse it. */
@@ -55,4 +56,46 @@ export function assessIndexCompatibility(
   )
     return { kind: "incompatible", reason: "repository identity differs" };
   return { kind: "reusable" };
+}
+
+/**
+ * Before the context index had its own identity, a pull-request review stored
+ * the review source's `owner/repo` (lowercased) as the index's repository id,
+ * while a local review stored a SHA-256 of the checkout path. Only the former
+ * shape was ever a source-scoped identity: GitHub owner and repository names
+ * cannot contain "/" and are never 64 hex digits, so the shapes cannot collide.
+ */
+export function isSourceScopedRepositoryId(id: string): boolean {
+  return /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(id);
+}
+
+/**
+ * Re-label an index that was built from this checkout's own bytes under a
+ * source-scoped identity. Nothing but the identity changes: file entries,
+ * content hashes, input hashes and vectors carry over untouched (the vector
+ * store is the same object, so its persisted blob is reused), and only the
+ * identity-derived chunk ids are recomputed. No provider is involved.
+ *
+ * The caller is responsible for knowing the index belongs to this checkout:
+ * the persisted index lives in a cache namespace derived from the checkout path.
+ */
+export function adoptRepositoryIdentity(
+  index: RepositoryIndex,
+  repositoryId: string,
+): RepositoryIndex {
+  const ids = new Map<string, string>();
+  const chunks = index.chunks.map((chunk) => {
+    const adopted = rebindChunkRepository(chunk, repositoryId);
+    ids.set(chunk.id, adopted.id);
+    return adopted;
+  });
+  return {
+    ...index,
+    repositoryId,
+    chunks,
+    files: index.files.map((file) => ({
+      ...file,
+      chunkIds: file.chunkIds.map((id) => ids.get(id) ?? id),
+    })),
+  };
 }

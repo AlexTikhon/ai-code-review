@@ -4,6 +4,7 @@ import type { ReviewModel } from "../../model/types.js";
 import type { EventSink } from "../../observability/events.js";
 import type { EmbeddingExecutionOptions } from "../../retrieval/embedding-execution.js";
 import type { EmbeddingAdapter } from "../../retrieval/embeddings.js";
+import type { GithubRequesterOptions } from "../../review-sources/github/client.js";
 import type {
   ContextMode,
   ContextUse,
@@ -51,6 +52,11 @@ export type ReviewRuntime = {
   now?: () => number;
   /** Test seams for embedding retries: the wait and the jitter source. */
   embeddingExecution?: Pick<EmbeddingExecutionOptions, "sleep" | "random">;
+  /** Test seams for GitHub collection: transport, credential, clock and waits. */
+  github?: Pick<
+    GithubRequesterOptions,
+    "token" | "fetch" | "now" | "sleep" | "timeoutSignal"
+  >;
 };
 
 /** Immutable facts about one run, threaded through the stages. */
@@ -68,6 +74,7 @@ export type PipelineContext = {
   /** When the total deadline fires, on the `now` clock; retries must fit before it. */
   readonly deadlineAt: number;
   readonly embeddingSeams?: ReviewRuntime["embeddingExecution"];
+  readonly githubSeams?: ReviewRuntime["github"];
   /** The single counter of external provider calls. */
   readonly budget: ExternalRequestBudget;
 };

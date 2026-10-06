@@ -1,7 +1,9 @@
 import type { ModelErrorCode } from "../model/errors.js";
 import type { EmbeddingErrorCode } from "../retrieval/embedding-errors.js";
+import type { SourceErrorCode, SourceName } from "../review-sources/errors.js";
+import type { RepositoryContextIdentity } from "./context-identity.js";
 
-export const RESULT_SCHEMA_VERSION = "1.2.0";
+export const RESULT_SCHEMA_VERSION = "1.3.0";
 export const PROMPT_VERSION = "3.0.0";
 export const POLICY_VERSION = "1.1.0";
 
@@ -67,8 +69,11 @@ export type ReviewSource = {
   mode: "pr" | "local";
   title: string;
   description: string;
+  /** Where the change comes from (`owner/repo` for a PR); used for reporting. */
   repositoryId: string;
   repositoryRoot?: string;
+  /** The local checkout the repository-context index is built from, if any. */
+  contextIdentity?: RepositoryContextIdentity;
   baseRevision: string;
   headRevision: string;
   snapshotId: string;
@@ -139,6 +144,8 @@ export type ReviewErrorCode =
   | ModelErrorCode
   /** The embedding provider failed; distinct from MODEL_* for the review model. */
   | EmbeddingErrorCode
+  /** The Git or GitHub source adapter failed while collecting the review. */
+  | SourceErrorCode
   /** The model answered, but a finding cited evidence that was not supplied. */
   | "MODEL_INVALID_EVIDENCE"
   | "REQUEST_BUDGET_EXHAUSTED"
@@ -161,6 +168,8 @@ export type ReviewError = {
   code?: ReviewErrorCode;
   /** Model provider involved, for model failures. */
   provider?: string;
+  /** Source adapter involved, for ingestion failures. */
+  source?: SourceName;
   /** Whether re-running the review could plausibly succeed. */
   retryable?: boolean;
 };
@@ -177,7 +186,10 @@ export type ReviewResult = {
   runId: string;
   status: ReviewStatus;
   summary: string;
-  source?: Omit<ReviewSource, "files" | "trustedIgnoreContents">;
+  source?: Omit<
+    ReviewSource,
+    "files" | "trustedIgnoreContents" | "contextIdentity"
+  >;
   coverage: Coverage;
   findings: ReviewerFinding[];
   abstentions: Array<{ filename: string; segmentId: string; reason: string }>;

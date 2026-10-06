@@ -90,7 +90,13 @@ export function configFailureResult(
 export function sourceSummary(
   source: ReviewSource,
 ): NonNullable<ReviewResult["source"]> {
-  const { files: _files, trustedIgnoreContents: _policy, ...summary } = source;
+  const {
+    files: _files,
+    trustedIgnoreContents: _policy,
+    // Internal: a hash of the local checkout path has no place in a report.
+    contextIdentity: _context,
+    ...summary
+  } = source;
   return {
     ...summary,
     title: redactSensitiveText(summary.title),
