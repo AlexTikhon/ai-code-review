@@ -67,7 +67,6 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
         provider: this.provider,
         label: "OpenAI embeddings",
         signal,
-        secrets: [this.apiKey],
       });
     }
   }
@@ -173,7 +172,6 @@ export class OpenAIEmbeddingAdapter implements EmbeddingAdapter {
       status: response.status,
       code,
       headers: response.headers,
-      secrets: [this.apiKey],
     });
   }
 }

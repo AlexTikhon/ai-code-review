@@ -80,7 +80,7 @@ unitTest(
           maxEmbeddingBatchSize: BATCH,
         }),
       ),
-      /provider down/,
+      /unclassified error/,
     );
     assert.equal(failing.state.requests, 7);
     assert.equal(
@@ -284,7 +284,7 @@ unitTest(
           checkpointEveryBatches: 4,
         }),
       ),
-      /provider down/,
+      /unclassified error/,
       "the provider error is reported, not the checkpoint error",
     );
     assert.equal(

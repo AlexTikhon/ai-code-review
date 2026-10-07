@@ -21,9 +21,15 @@ export function filterReviewFiles(
   skipped: SkippedFile[];
   eligible: number;
   omitted: number;
+  /**
+   * Destinations refused for privacy or ignore reasons. Context indexing must
+   * not read them either, even when the path alone looks ordinary (a rename).
+   */
+  blockedPaths: string[];
 } {
   const files: ReviewableFile[] = [];
   const skipped: SkippedFile[] = [];
+  const blockedPaths: string[] = [];
   let eligible = 0;
   let omitted = 0;
   for (const sourceFile of source.files) {
@@ -36,15 +42,21 @@ export function filterReviewFiles(
         reason: privacy.reason!,
         details: privacy.details,
       });
+      blockedPaths.push(sourceFile.filename);
       continue;
     }
-    if (isIgnoredPath(sourceFile.filename, policy)) {
+    // The origin of a rename or copy is judged by the same trusted rules.
+    const ignoredOrigin = sourceFile.previousFilename
+      ? isIgnoredPath(sourceFile.previousFilename, policy)
+      : false;
+    if (ignoredOrigin || isIgnoredPath(sourceFile.filename, policy)) {
       skipped.push({
         filename: sourceFile.filename,
         fileType,
         reason: "ignored_by_user",
-        details: `Matched ${policy.path}.`,
+        details: `${ignoredOrigin ? "Origin path matched" : "Matched"} ${policy.path}.`,
       });
+      blockedPaths.push(sourceFile.filename);
       continue;
     }
     if (fileType === "generated") {
@@ -117,5 +129,5 @@ export function filterReviewFiles(
       originalPatchCharacters: sourceFile.patch.length,
     });
   }
-  return { files, skipped, eligible, omitted };
+  return { files, skipped, eligible, omitted, blockedPaths };
 }

@@ -93,7 +93,12 @@ async function runStages(ctx: PipelineContext): Promise<Staged> {
       ),
     );
 
-  const context = await contextStage(ctx, source, filtered.policy);
+  const context = await contextStage(
+    ctx,
+    source,
+    filtered.policy,
+    filtered.blockedPaths,
+  );
   const prepared = assembleResult(base, source, filtered, context);
 
   if (request.indexOnly)

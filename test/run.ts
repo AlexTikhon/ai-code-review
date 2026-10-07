@@ -45,6 +45,8 @@ import "./prompt-estimate.test.js";
 import "./request-planning.test.js";
 import "./provider-composition.test.js";
 import "./live-eval.test.js";
+import "./source-admission.test.js";
+import "./provider-diagnostics.test.js";
 import { getTestCases } from "./helpers.js";
 
 let completed = false;

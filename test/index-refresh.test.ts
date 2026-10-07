@@ -322,7 +322,7 @@ unitTest(
           embedding: adapter,
         }),
       ),
-      /provider down/,
+      /unclassified error/,
     );
     // Manifest, metadata and vector blob: not one byte differs, nothing is added.
     assert.deepEqual(

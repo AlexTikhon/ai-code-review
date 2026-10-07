@@ -411,7 +411,7 @@ unitTest(
           if (requests === 2) controller.abort(new Error("cancelled"));
         },
       }),
-      /cancelled/,
+      /embedding request aborted/,
     );
     assert.equal(harness.embedded.length, 1, "no request after abort");
   },
@@ -422,10 +422,7 @@ unitTest(
   async () => {
     const harness = seeded(6);
     harness.failEmbeddingAt = 2;
-    await assert.rejects(
-      harness.update(undefined),
-      /embedding provider failure/,
-    );
+    await assert.rejects(harness.update(undefined), /unclassified error/);
     assert.equal(harness.embedded.length, 2);
   },
 );

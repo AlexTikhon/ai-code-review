@@ -33,6 +33,7 @@ export async function contextStage(
   ctx: PipelineContext,
   source: ReviewSource,
   policy: LoadedIgnore,
+  blockedPaths: readonly string[] = [],
 ): Promise<ContextOutcome> {
   const { contextMode } = ctx.request;
   if (contextMode === "diff")
@@ -65,6 +66,7 @@ export async function contextStage(
       cacheDirName: ctx.config.cacheDirName,
       maxChunkTokens: Math.min(ctx.config.maxContextTokens, 800),
       ignorePolicy: policy,
+      excludePaths: new Set(blockedPaths),
       embedding: hybrid && !ctx.request.dryRun ? embedding : undefined,
       signal: ctx.signal,
       beforeEmbeddingRequest: () => ctx.budget.reserve("embedding"),

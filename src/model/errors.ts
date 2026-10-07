@@ -74,7 +74,8 @@ export class ReviewModelError extends Error {
     this.retryable = init.retryable ?? RETRYABLE_BY_DEFAULT[init.kind];
     if (init.statusCode !== undefined) this.statusCode = init.statusCode;
     if (init.retryAfterMs !== undefined) this.retryAfterMs = init.retryAfterMs;
-    if (init.code !== undefined) this.code = init.code;
+    const code = safeProviderCode(init.code);
+    if (code !== undefined) this.code = code;
   }
 }
 
@@ -102,21 +103,40 @@ export function kindForHttpStatus(status: number | undefined): HttpErrorKind {
   return "unknown";
 }
 
-const MAX_EXCERPT = 200;
-
 /**
- * Bounded single-line excerpt of provider text with credentials removed.
- * Provider text may echo input, so only a short prefix is ever kept.
+ * Provider error codes and types that are safe to surface. Anything else a
+ * provider (or a hostile response) puts in a code or type field is free text
+ * that can echo the request, i.e. source code, so it is dropped, not trimmed.
  */
-export function safeExcerpt(
-  text: string,
-  secrets: ReadonlyArray<string | undefined>,
-  max = MAX_EXCERPT,
-): string {
-  let result = text;
-  for (const secret of secrets)
-    if (secret) result = result.split(secret).join("[key]");
-  return result.replace(/\s+/g, " ").trim().slice(0, max);
+const KNOWN_PROVIDER_CODES: ReadonlySet<string> = new Set([
+  // OpenAI
+  "invalid_api_key",
+  "invalid_request_error",
+  "model_not_found",
+  "insufficient_quota",
+  "rate_limit_exceeded",
+  "context_length_exceeded",
+  "server_error",
+  "service_unavailable",
+  "access_terminated",
+  "billing_not_active",
+  // Anthropic
+  "authentication_error",
+  "permission_error",
+  "not_found_error",
+  "request_too_large",
+  "rate_limit_error",
+  "api_error",
+  "overloaded_error",
+  "timeout_error",
+  "billing_error",
+]);
+
+/** The provider's own error code if it is a known, fixed identifier; otherwise nothing. */
+export function safeProviderCode(raw: unknown): string | undefined {
+  return typeof raw === "string" && KNOWN_PROVIDER_CODES.has(raw)
+    ? raw
+    : undefined;
 }
 
 export function missingKeyError(
@@ -192,31 +212,35 @@ export function retryAfterFromHeaders(
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 }
 
+/**
+ * An HTTP failure. The provider's message text is never kept: it can echo the
+ * request, i.e. source code. Only the status, retry timing and a code from the
+ * known vocabulary are.
+ */
 export function httpStatusError(input: {
   provider: string;
   label: string;
   status: number;
-  detail?: string;
   code?: string;
   headers?: Pick<Headers, "get"> | null;
-  secrets: ReadonlyArray<string | undefined>;
 }): ReviewModelError {
   const kind = kindForHttpStatus(input.status);
   const retryable = RETRYABLE_BY_DEFAULT[kind];
-  const detail = input.detail ? safeExcerpt(input.detail, input.secrets) : "";
+  const code = safeProviderCode(input.code);
   return new ReviewModelError({
     kind,
     provider: input.provider,
-    message: `${input.label} error ${input.status}${detail ? `: ${detail}` : ""}`,
+    message: `${input.label} error ${input.status}${code ? ` (${code})` : ""}`,
     statusCode: input.status,
     retryAfterMs: retryable ? retryAfterFromHeaders(input.headers) : undefined,
-    code: input.code ? safeExcerpt(input.code, input.secrets, 80) : undefined,
+    code,
   });
 }
 
 /**
  * Last-resort classification of anything thrown around a provider call that
- * the adapter did not already recognize. Never retains the raw error.
+ * the adapter did not already recognize. Never retains the raw error or its
+ * message: a transport or SDK error can carry request text.
  */
 export function normalizeThrown(
   error: unknown,
@@ -224,13 +248,10 @@ export function normalizeThrown(
     provider: string;
     label: string;
     signal: AbortSignal;
-    secrets: ReadonlyArray<string | undefined>;
   },
 ): ReviewModelError {
   if (error instanceof ReviewModelError) return error;
   if (input.signal.aborted) return abortedError(input.provider, input.signal);
-  const text = error instanceof Error ? error.message : "";
-  const safe = text ? `: ${safeExcerpt(text, input.secrets)}` : "";
   if (error instanceof Error && error.name === "AbortError")
     return new ReviewModelError({
       kind: "aborted",
@@ -242,11 +263,11 @@ export function normalizeThrown(
     return new ReviewModelError({
       kind: "network",
       provider: input.provider,
-      message: `${input.label} connection error${safe}`,
+      message: `${input.label} connection error`,
     });
   return new ReviewModelError({
     kind: "unknown",
     provider: input.provider,
-    message: `${input.label} request failed${safe}`,
+    message: `${input.label} request failed`,
   });
 }

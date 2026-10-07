@@ -90,7 +90,7 @@ export function redactSensitiveText(value: string): string {
   return redacted;
 }
 export function evaluateFilePrivacy(
-  file: Pick<SourceFile, "filename" | "patch">,
+  file: Pick<SourceFile, "filename" | "previousFilename" | "patch">,
 ): PrivacyDecision {
   if (isMandatorySensitivePath(file.filename))
     return {
@@ -98,6 +98,14 @@ export function evaluateFilePrivacy(
       reason: "sensitive_path",
       details:
         "Blocked by mandatory sensitive-path policy; user negation cannot override it.",
+    };
+  // A rename or copy carries its origin's bytes: the origin's policy applies.
+  if (file.previousFilename && isMandatorySensitivePath(file.previousFilename))
+    return {
+      allowed: false,
+      reason: "sensitive_path",
+      details:
+        "Renamed or copied from a path blocked by the mandatory sensitive-path policy; user negation cannot override it.",
     };
   const match = file.patch ? inspectSensitiveContent(file.patch) : undefined;
   if (match)

@@ -184,25 +184,20 @@ export class AnthropicReviewModel implements ReviewModel {
         message: "Anthropic connection error",
       });
     if (error instanceof Anthropic.APIError && error.status !== undefined) {
-      const body = (
-        error.error as
-          { error?: { type?: unknown; message?: unknown } } | undefined
-      )?.error;
+      const body = (error.error as { error?: { type?: unknown } } | undefined)
+        ?.error;
       return httpStatusError({
         provider: this.provider,
         label: "Anthropic",
         status: error.status,
-        detail: typeof body?.message === "string" ? body.message : undefined,
         code: typeof body?.type === "string" ? body.type : undefined,
         headers: error.headers as Headers | undefined,
-        secrets: [this.apiKey],
       });
     }
     return normalizeThrown(error, {
       provider: this.provider,
       label: "Anthropic",
       signal,
-      secrets: [this.apiKey],
     });
   }
 }

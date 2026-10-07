@@ -104,3 +104,33 @@ export function classifyFile(filename: string): ReviewedFileType {
 export function isReviewableFileType(fileType: ReviewedFileType): boolean {
   return fileType === "source" || fileType === "test" || fileType === "config";
 }
+
+/** Directories whose contents are build output or third-party code, by exact path component. */
+const GENERATED_OR_VENDOR_DIRECTORIES = new Set([
+  "node_modules",
+  "bower_components",
+  "vendor",
+  "dist",
+  "build",
+  ".next",
+  "coverage",
+]);
+const MINIFIED = /\.min\.[cm]?js$/i;
+
+/**
+ * True for generated or vendored files that must not become repository
+ * context. Matches whole path components (so `src/node_modules-helper.ts` and
+ * `src/dist.ts` are ordinary) and is independent of any user ignore rule.
+ */
+export function isGeneratedOrVendorPath(path: string): boolean {
+  const components = path
+    .replaceAll("\\", "/")
+    .toLowerCase()
+    .split("/")
+    .filter(Boolean);
+  const basename = components.pop() ?? "";
+  return (
+    components.some((part) => GENERATED_OR_VENDOR_DIRECTORIES.has(part)) ||
+    MINIFIED.test(basename)
+  );
+}

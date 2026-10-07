@@ -1,7 +1,7 @@
 import {
   kindForHttpStatus,
   retryAfterFromHeaders,
-  safeExcerpt,
+  safeProviderCode,
   type HttpErrorKind,
 } from "../model/errors.js";
 
@@ -86,7 +86,8 @@ export class EmbeddingError extends Error {
     this.retryable = init.retryable ?? RETRYABLE_BY_DEFAULT[init.kind];
     if (init.statusCode !== undefined) this.statusCode = init.statusCode;
     if (init.retryAfterMs !== undefined) this.retryAfterMs = init.retryAfterMs;
-    if (init.code !== undefined) this.code = init.code;
+    const code = safeProviderCode(init.code);
+    if (code !== undefined) this.code = code;
   }
 }
 
@@ -107,14 +108,8 @@ export function abortedEmbeddingError(
   provider: string,
   signal: AbortSignal | undefined,
 ): EmbeddingError {
-  const reason = signal?.reason as
-    { name?: unknown; message?: unknown } | undefined;
+  const reason = signal?.reason as { name?: unknown } | undefined;
   const timedOut = reason?.name === "TimeoutError";
-  // The reason is the caller's own (deadline, user cancel), never provider text.
-  const why =
-    typeof reason?.message === "string" && reason.message
-      ? ` (${safeExcerpt(reason.message, [], 80)})`
-      : "";
   return timedOut
     ? new EmbeddingError({
         kind: "timeout",
@@ -124,7 +119,7 @@ export function abortedEmbeddingError(
     : new EmbeddingError({
         kind: "aborted",
         provider,
-        message: `${provider} embedding request aborted${why}`,
+        message: `${provider} embedding request aborted`,
       });
 }
 
@@ -152,9 +147,8 @@ export function embeddingHttpError(input: {
   status: number;
   code?: string;
   headers?: Pick<Headers, "get"> | null;
-  secrets: ReadonlyArray<string | undefined>;
 }): EmbeddingError {
-  const code = input.code ? safeExcerpt(input.code, input.secrets, 80) : "";
+  const code = safeProviderCode(input.code) ?? "";
   // The one provider code that is more specific than any status.
   const kind: EmbeddingErrorKind =
     code === "model_not_found"
@@ -182,14 +176,11 @@ export function normalizeEmbeddingThrown(
     provider: string;
     label: string;
     signal: AbortSignal | undefined;
-    secrets: ReadonlyArray<string | undefined>;
   },
 ): EmbeddingError {
   if (error instanceof EmbeddingError) return error;
   if (input.signal?.aborted)
     return abortedEmbeddingError(input.provider, input.signal);
-  const text = error instanceof Error ? error.message : "";
-  const safe = text ? `: ${safeExcerpt(text, input.secrets)}` : "";
   if (error instanceof Error && error.name === "AbortError")
     return new EmbeddingError({
       kind: "aborted",
@@ -201,11 +192,11 @@ export function normalizeEmbeddingThrown(
     return new EmbeddingError({
       kind: "network",
       provider: input.provider,
-      message: `${input.label} connection error${safe}`,
+      message: `${input.label} connection error`,
     });
   return new EmbeddingError({
     kind: "unknown",
     provider: input.provider,
-    message: `${input.label} request failed${safe}`,
+    message: `${input.label} request failed`,
   });
 }

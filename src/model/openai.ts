@@ -15,7 +15,7 @@ import {
 import type { ModelRequest, ModelResult, ReviewModel } from "./types.js";
 
 type OpenAIErrorBody = {
-  error?: { message?: unknown; code?: unknown; type?: unknown };
+  error?: { code?: unknown; type?: unknown };
 };
 
 export class OpenAIReviewModel implements ReviewModel {
@@ -127,24 +127,20 @@ export class OpenAIReviewModel implements ReviewModel {
   }
 
   private async httpError(response: Response): Promise<ReviewModelError> {
-    let detail: string | undefined;
     let code: string | undefined;
     try {
       const body = JSON.parse(await response.text()) as OpenAIErrorBody;
-      if (typeof body.error?.message === "string") detail = body.error.message;
       const raw = body.error?.code ?? body.error?.type;
       if (typeof raw === "string") code = raw;
     } catch {
-      // A non-JSON error body is never echoed.
+      // A non-JSON error body is never echoed; the message text never is.
     }
     return httpStatusError({
       provider: this.provider,
       label: "OpenAI",
       status: response.status,
-      detail,
       code,
       headers: response.headers,
-      secrets: [this.apiKey],
     });
   }
 
@@ -153,7 +149,6 @@ export class OpenAIReviewModel implements ReviewModel {
       provider: this.provider,
       label: "OpenAI",
       signal,
-      secrets: [this.apiKey],
     });
   }
 }

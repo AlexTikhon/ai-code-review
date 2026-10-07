@@ -20,6 +20,8 @@ export type FilterOutcome =
       eligible: number;
       omitted: number;
       truncated: number;
+      /** Destinations the context index must not read; see filterReviewFiles. */
+      blockedPaths: string[];
       /** Non-fatal notes, e.g. incomplete source coverage. */
       errors: ReviewError[];
     }
@@ -78,6 +80,7 @@ export async function filterStage(
     skipped: filtered.skipped,
     eligible: filtered.eligible,
     omitted: filtered.omitted,
+    blockedPaths: filtered.blockedPaths,
     truncated: filtered.files.filter((file) => file.truncated).length,
     errors,
   };

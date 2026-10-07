@@ -1,6 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { RequestBudgetError } from "../model/budget.js";
-import { safeExcerpt } from "../model/errors.js";
 import {
   EmbeddingError,
   abortedEmbeddingError,
@@ -293,10 +292,10 @@ function unclassified(
 ): EmbeddingError {
   if (error instanceof EmbeddingError) return error;
   if (signal?.aborted) return abortedEmbeddingError(adapter.provider, signal);
-  const text = error instanceof Error ? safeExcerpt(error.message, []) : "";
+  // The raw message may carry the texts that were being embedded: never kept.
   return new EmbeddingError({
     kind: "unknown",
     provider: adapter.provider,
-    message: `${adapter.provider} embedding adapter raised an unclassified error${text ? `: ${text}` : ""}`,
+    message: `${adapter.provider} embedding adapter raised an unclassified error`,
   });
 }

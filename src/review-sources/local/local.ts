@@ -288,7 +288,12 @@ async function tracked(
   for (let offset = 0; offset < entries.length; offset += 8) {
     const batch = await Promise.all(
       entries.slice(offset, offset + 8).map(async (entry) => {
-        if (!allowed(entry.filename))
+        // Both ends of a rename or copy: the destination carries the origin's bytes.
+        if (
+          !allowed(entry.filename) ||
+          (entry.previousFilename !== undefined &&
+            !allowed(entry.previousFilename))
+        )
           return { ...entry, additions: 0, deletions: 0, changes: 0 };
         const patch = await runGit(
           [

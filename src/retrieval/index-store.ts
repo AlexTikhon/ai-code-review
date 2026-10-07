@@ -9,6 +9,7 @@ import {
   inspectSensitiveContent,
   isMandatorySensitivePath,
 } from "../privacy/policy.js";
+import { isGeneratedOrVendorPath } from "../review/file-classifier.js";
 import { isIgnoredPath, type LoadedIgnore } from "../review/ignore.js";
 import { POLICY_VERSION } from "../review/types.js";
 import {
@@ -350,6 +351,13 @@ export type RepositoryIndexInput = {
    * never depends on timestamps. Revision (PR) indexes use Git blob ids instead.
    */
   trustFileStat?: boolean;
+  /**
+   * Paths this run must not read, chunk or embed although they look ordinary
+   * (for example the destination of a rename from a protected path). Applied
+   * to the scan, so a previous index, stat reuse, salvaged vectors and
+   * checkpoints can only ever contribute what the scan admits.
+   */
+  excludePaths?: ReadonlySet<string>;
   /** Test seam: replaces the chunker. */
   chunk?: typeof chunkSource;
 };
@@ -379,6 +387,8 @@ async function scanSourceFiles(
       entry.symlink ||
       (entry.size !== undefined && entry.size > MAX_FILE_BYTES) ||
       isMandatorySensitivePath(name) ||
+      isGeneratedOrVendorPath(name) ||
+      input.excludePaths?.has(name) ||
       isIgnoredPath(name, input.ignorePolicy)
     )
       continue;
