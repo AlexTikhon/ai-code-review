@@ -47,7 +47,7 @@ npm run build
 node dist/src/cli.js --local --dry-run --format json
 ```
 
-The manifest lists proposed files, omissions, destinations, and estimated requests/tokens without raw code or secrets and makes zero model/embedding calls.
+The manifest lists proposed files, omissions, destinations, and estimated requests/tokens without raw code or secrets and makes zero model/embedding calls. It is produced by the same request planner that real execution uses, so in `--context diff` mode `estimatedRequests` and `estimatedInputTokens` are the logical request plan a real run would build for the same source and configuration. `estimatedRequests` counts planned logical requests (one per diff segment), not paid API calls: retries, cache hits and future provider failures are not predicted. With `--context lexical|hybrid` the dry run never calls retrieval or embeddings, so `estimatedInputTokens` covers only the mandatory diff request and `contextTokenBound` / `inputTokenBound` give a ceiling for the optional context, not a prediction.
 
 Caches live in a repository-specific namespace under the current user's OS cache (Windows: `%USERPROFILE%/AppData/Local/ai-code-reviewer`; macOS: `~/Library/Caches/ai-code-reviewer`; Linux: `~/.cache/ai-code-reviewer`). Repository-local caches are ignored and rebuilt, and cache path symlinks/junctions are rejected. `--index` reports the exact manifest path. Index publication and cleanup are serialized across CLI processes.
 
@@ -97,7 +97,7 @@ Coverage fields have documented definitions in the JSON schema/type: `discovered
 
 Exit codes are `0` for a complete result below the configured finding threshold, `1` for a complete result meeting/exceeding the threshold, `2` for failed/partial operational or incomplete review, and `64` for CLI usage errors. Dry-run/index return `0` unless their operation fails.
 
-JSON uses schema version `1.3.0` (1.2.0 added optional `code`, `provider` and `retryable` to each error; 1.3.0 adds ingestion codes such as `GITHUB_RATE_LIMIT`, `GITHUB_REVISION_CHANGED` and `GIT_NOT_A_REPOSITORY`, plus an optional `source` of `github` or `git`). `retryable` tells CI whether re-running could succeed. SARIF 2.1.0 includes the same status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
+JSON uses schema version `1.4.0` (1.4.0 adds `contextTokenBound`, `inputTokenBound` and `estimateBasis` to the dry-run manifest, and `estimatedInputTokens` there now covers the full mandatory request; 1.2.0 added optional `code`, `provider` and `retryable` to each error; 1.3.0 adds ingestion codes such as `GITHUB_RATE_LIMIT`, `GITHUB_REVISION_CHANGED` and `GIT_NOT_A_REPOSITORY`, plus an optional `source` of `github` or `git`). `retryable` tells CI whether re-running could succeed. SARIF 2.1.0 includes the same status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
 
 Valid insufficient-evidence responses are recorded as explicit per-segment abstentions and still count as completed review coverage; they are not findings.
 
@@ -155,6 +155,6 @@ AI_REVIEW_EMBEDDING_MAX_ATTEMPTS=3      # 1-10
 AI_REVIEW_EMBEDDING_RETRY_BASE_MS=250   # 0-10000
 ```
 
-Token estimates use a conservative one-token-per-UTF-8-byte fallback; they are not tokenizer-exact. The system/user messages, structured-output schema and message-envelope overhead, bounded metadata, diff, selected context, and output reservation must fit before the provider boundary. Provider-reported token usage is recorded only for calls made in the current run.
+Token estimates use a conservative one-token-per-UTF-8-byte fallback; they are conservative application-level estimates, not tokenizer-exact and not provider billing-token counts. Diff segments are fitted against the full request: the system/user messages, structured-output schema and message-envelope overhead, bounded metadata and path, segment text, its line map and valid-range trailer, and the output reservation must all fit within `AI_REVIEW_MAX_INPUT_TOKENS` before the provider boundary, in addition to the independent `AI_REVIEW_MAX_PATCH_TOKENS` and `AI_REVIEW_MAX_SEGMENTS_PER_FILE` caps. Repository context is optional and only fills what the mandatory diff request leaves free (up to `AI_REVIEW_MAX_CONTEXT_TOKENS`). Content that cannot be presented (past the segment cap, or a line too large to fragment) makes the file `truncated` and the review `partial`; a file whose fixed request leaves no room at all is omitted. A configuration whose output reservation is not below the input allowance, or whose fixed prompt leaves no room for a diff, is rejected up front. Provider-reported token usage is recorded only for calls made in the current run.
 
 See [architecture decisions](docs/ARCHITECTURE.md) and [evaluation details](docs/EVALUATION.md).

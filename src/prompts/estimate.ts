@@ -24,6 +24,12 @@ export const MESSAGE_FRAMING_TOKENS = 200;
 export const REQUEST_OVERHEAD_TOKENS =
   RESPONSE_SCHEMA_TOKENS + MESSAGE_FRAMING_TOKENS;
 
+/**
+ * Smallest allowance a request must leave beyond its fixed text for any diff
+ * content to be worth sending; below it the configuration is rejected early.
+ */
+export const MIN_DIFF_HEADROOM_TOKENS = 200;
+
 export function estimatePromptTokens(prompt: {
   system: string;
   user: string;

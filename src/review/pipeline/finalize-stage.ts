@@ -1,4 +1,8 @@
-import { estimateTokens } from "../patch.js";
+import {
+  contextAllowanceTokens,
+  estimateSegmentRequest,
+} from "../request-plan.js";
+import type { ReviewConfig } from "../../config/config.js";
 import type {
   ReviewResult,
   ReviewSource,
@@ -55,25 +59,65 @@ export function finalizeIndexOnly(
   };
 }
 
-function proposedFiles(files: readonly ReviewableFile[]) {
-  return files.map((file) => ({
-    filename: file.filename,
-    segments: file.segments.length,
-    estimatedInputTokens: file.segments.reduce(
-      (sum, segment) => sum + estimateTokens(segment.text),
-      0,
-    ),
-  }));
+/**
+ * Per-file figures from the same planner and renderers execution uses. The
+ * segments are the plan itself (filter stage); only sizes are derived here.
+ */
+function proposedFiles(
+  source: ReviewSource,
+  files: readonly ReviewableFile[],
+  config: ReviewConfig,
+  withContext: boolean,
+) {
+  return files.map((file) => {
+    const sizes = file.segments.map((segment) => {
+      const mandatory = estimateSegmentRequest(
+        {
+          title: source.title,
+          description: source.description,
+          filename: file.filename,
+          fileType: file.fileType,
+        },
+        segment,
+        config,
+      );
+      return {
+        mandatory,
+        context: withContext ? contextAllowanceTokens(mandatory, config) : 0,
+      };
+    });
+    return {
+      filename: file.filename,
+      segments: file.segments.length,
+      estimatedInputTokens: sizes.reduce((sum, s) => sum + s.mandatory, 0),
+      contextTokenBound: sizes.reduce((sum, s) => sum + s.context, 0),
+    };
+  });
 }
 
 /** The privacy-reviewable manifest. Makes, and implies, no provider call. */
 export function finalizeDryRun(
   result: ReviewResult,
   ctx: PipelineContext,
+  source: ReviewSource,
   files: readonly ReviewableFile[],
   omissions: SkippedFile[],
 ): ReviewResult {
-  const proposed = proposedFiles(files);
+  // Context can enrich a request only when an index was actually prepared.
+  const proposed = proposedFiles(
+    source,
+    files,
+    ctx.config,
+    result.context.state === "used",
+  );
+  const estimatedInputTokens = proposed.reduce(
+    (sum, item) => sum + item.estimatedInputTokens,
+    0,
+  );
+  const contextTokenBound = proposed.reduce(
+    (sum, item) => sum + item.contextTokenBound,
+    0,
+  );
   const { config } = ctx;
   return {
     ...result,
@@ -93,10 +137,11 @@ export function finalizeDryRun(
           : []),
       ],
       estimatedRequests: proposed.reduce((sum, item) => sum + item.segments, 0),
-      estimatedInputTokens: proposed.reduce(
-        (sum, item) => sum + item.estimatedInputTokens,
-        0,
-      ),
+      estimatedInputTokens,
+      contextTokenBound,
+      inputTokenBound: estimatedInputTokens + contextTokenBound,
+      estimateBasis:
+        "Planned logical requests and conservative application-level input estimates (UTF-8 bytes plus response schema and message framing), not provider billing-token counts. estimatedInputTokens covers the mandatory diff request only; with repository context each request may add up to its context bound, which depends on retrieval and is not known without calling it. Cache hits and retries are not predicted.",
     },
     summary: `Dry run: ${files.length} file(s) proposed, ${omissions.length} omitted. No model or embedding calls were made.`,
   };

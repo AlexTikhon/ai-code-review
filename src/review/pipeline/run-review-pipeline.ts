@@ -15,6 +15,7 @@ import {
   withRunMetrics,
 } from "./finalize-stage.js";
 import { ingestStage } from "./ingest-stage.js";
+import { requestBudgetProblem } from "../request-plan.js";
 import { createBaseResult, failedResult, sourceSummary } from "./result.js";
 import type {
   PipelineContext,
@@ -45,6 +46,16 @@ async function runStages(ctx: PipelineContext): Promise<Staged> {
     provider: ctx.model?.provider ?? "none",
     name: config.model,
   });
+
+  const budgetProblem = requestBudgetProblem(config);
+  if (budgetProblem)
+    return done(
+      failedResult(
+        base,
+        { stage: "config", message: budgetProblem, fatal: true },
+        `Review failed: the request budget is not workable. ${budgetProblem}`,
+      ),
+    );
 
   if (!ctx.model && !request.dryRun && !request.indexOnly)
     return done(
@@ -89,7 +100,7 @@ async function runStages(ctx: PipelineContext): Promise<Staged> {
     return finalizing(ctx, () => finalizeIndexOnly(prepared, context));
   if (request.dryRun)
     return finalizing(ctx, () =>
-      finalizeDryRun(prepared, ctx, filtered.files, filtered.skipped),
+      finalizeDryRun(prepared, ctx, source, filtered.files, filtered.skipped),
     );
 
   const outcomes = await analyzeStage(ctx, {

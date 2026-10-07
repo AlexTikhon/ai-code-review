@@ -42,6 +42,7 @@ import "./anthropic-model.test.js";
 import "./model-errors.test.js";
 import "./failure-semantics.test.js";
 import "./prompt-estimate.test.js";
+import "./request-planning.test.js";
 import "./provider-composition.test.js";
 import "./live-eval.test.js";
 import { getTestCases } from "./helpers.js";

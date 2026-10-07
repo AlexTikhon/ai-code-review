@@ -3,7 +3,7 @@ import type { ReviewConfig } from "../config/config.js";
 import { evaluateFilePrivacy } from "../privacy/policy.js";
 import { classifyFile, isReviewableFileType } from "./file-classifier.js";
 import { isIgnoredPath, type LoadedIgnore } from "./ignore.js";
-import { splitPatchForReview } from "./patch.js";
+import { planReviewSegments } from "./request-plan.js";
 import type { ReviewSource, ReviewableFile, SkippedFile } from "./types.js";
 export function ignoreFromTrustedContents(contents?: string): LoadedIgnore {
   return {
@@ -87,16 +87,33 @@ export function filterReviewFiles(
       });
       continue;
     }
-    const segments = splitPatchForReview(
+    const plan = planReviewSegments(
       sourceFile.patch,
-      config.maxPatchTokens,
-      config.maxSegmentsPerFile,
+      {
+        title: source.title,
+        description: source.description,
+        filename: sourceFile.filename,
+        fileType,
+      },
+      config,
     );
+    if (plan.unplannable) {
+      omitted++;
+      skipped.push({
+        filename: sourceFile.filename,
+        fileType,
+        reason: "work_limit",
+        details: plan.unplannable,
+      });
+      continue;
+    }
+    const { segments } = plan;
     files.push({
       ...sourceFile,
       fileType,
       segments,
-      truncated: segments.some((segment) => segment.truncated),
+      truncated:
+        plan.truncated || segments.some((segment) => segment.truncated),
       originalPatchCharacters: sourceFile.patch.length,
     });
   }

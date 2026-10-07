@@ -1,4 +1,5 @@
 /** The only invocation fact configuration depends on; CliArgs satisfies it. */
+import { requestBudgetProblem } from "../review/request-plan.js";
 export type ConfigOptions = { allowExternal: boolean };
 export const REVIEW_PROVIDERS = ["openai", "anthropic"] as const;
 export type ReviewProviderName = (typeof REVIEW_PROVIDERS)[number];
@@ -107,7 +108,7 @@ export function loadConfig(options: ConfigOptions): ReviewConfig {
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1)
     throw new Error("AI_REVIEW_RELEVANCE_THRESHOLD must be between 0 and 1");
   const provider = reviewProvider();
-  return {
+  const config = {
     reviewProvider: provider,
     model: modelFor(provider),
     embeddingModel:
@@ -143,4 +144,7 @@ export function loadConfig(options: ConfigOptions): ReviewConfig {
     relevanceThreshold: threshold,
     cacheDirName: ".ai-reviewer/cache",
   };
+  const problem = requestBudgetProblem(config);
+  if (problem) throw new Error(problem);
+  return config;
 }

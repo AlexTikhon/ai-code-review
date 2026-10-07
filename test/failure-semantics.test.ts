@@ -207,22 +207,36 @@ unitTest(
   },
 );
 
-unitTest("a local prompt-assembly failure is ANALYSIS_FAILED", async () => {
-  let calls = 0;
-  const result = await review(
-    {
-      provider: "test",
-      async review() {
-        calls++;
-        return cleanResult();
+unitTest(
+  "an impossible request budget fails before any call or source work",
+  async () => {
+    let calls = 0;
+    const events: string[] = [];
+    const result = await executeReviewPipeline(
+      request,
+      { ...testConfig, maxInputTokens: 300, maxOutputTokens: 200 },
+      {
+        model: {
+          provider: "test",
+          async review() {
+            calls++;
+            return cleanResult();
+          },
+        },
+        events: (event) => events.push(event.stage),
+        source: source(),
       },
-    },
-    { ...testConfig, maxInputTokens: 300, maxOutputTokens: 200 },
-  );
-  assert.equal(calls, 0);
-  assert.equal(result.errors[0]?.code, "ANALYSIS_FAILED");
-  assertNeverClean(result);
-});
+    );
+    assert.equal(calls, 0);
+    assert.equal(result.status, "failed");
+    assert.equal(result.errors[0]?.stage, "config");
+    assert.equal(result.errors[0]?.fatal, true);
+    assert.match(result.errors[0]?.message ?? "", /AI_REVIEW_MAX_INPUT_TOKENS/);
+    assert.ok(!events.includes("ingest"), "no source work before the check");
+    assert.equal(result.coverage.reviewed, 0);
+    assert.equal(result.findings.length, 0);
+  },
+);
 
 unitTest(
   "typed failures never put secrets or source into results",

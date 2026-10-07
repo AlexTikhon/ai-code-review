@@ -3,7 +3,7 @@ import type { EmbeddingErrorCode } from "../retrieval/embedding-errors.js";
 import type { SourceErrorCode, SourceName } from "../review-sources/errors.js";
 import type { RepositoryContextIdentity } from "./context-identity.js";
 
-export const RESULT_SCHEMA_VERSION = "1.3.0";
+export const RESULT_SCHEMA_VERSION = "1.4.0";
 export const PROMPT_VERSION = "3.0.0";
 export const POLICY_VERSION = "1.1.0";
 
@@ -208,11 +208,21 @@ export type ReviewResult = {
     proposedFiles: Array<{
       filename: string;
       segments: number;
+      /** Mandatory (diff-only) input estimate across the file's planned requests. */
       estimatedInputTokens: number;
+      /** Upper bound of optional context across them; 0 in diff mode. */
+      contextTokenBound: number;
     }>;
     omissions: SkippedFile[];
     destinations: string[];
+    /** Planned logical requests (one per diff segment); not a count of paid calls. */
     estimatedRequests: number;
+    /** Mandatory (diff-only) input estimate; the exact figure for diff mode. */
     estimatedInputTokens: number;
+    /** Most optional context the planned requests could add; 0 in diff mode. */
+    contextTokenBound: number;
+    /** estimatedInputTokens + contextTokenBound: a ceiling, not a prediction. */
+    inputTokenBound: number;
+    estimateBasis: string;
   };
 };
