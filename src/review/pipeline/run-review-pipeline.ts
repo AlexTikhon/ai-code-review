@@ -93,11 +93,17 @@ async function runStages(ctx: PipelineContext): Promise<Staged> {
       ),
     );
 
+  // One request per planned segment stays available to model review, so
+  // optional embedding work can never spend the allowance the review needs.
+  const plannedSegments = request.indexOnly
+    ? 0
+    : filtered.files.reduce((sum, file) => sum + file.segments.length, 0);
   const context = await contextStage(
     ctx,
     source,
     filtered.policy,
     filtered.blockedPaths,
+    plannedSegments,
   );
   const prepared = assembleResult(base, source, filtered, context);
 

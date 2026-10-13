@@ -33,7 +33,7 @@ ReviewResult --> text | JSON | SARIF
 | -------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
 | ingest   | `ingest-stage.ts`                                      | Collect a `ReviewSource` from Git/GitHub. A failure is fatal and short-circuits the run.                                      |
 | filter   | `filter-stage.ts`, `../request-plan.ts`                | Choose the trusted ignore policy, apply privacy/ignore/type/work-limit rules, plan full-request segments, compute truncation. |
-| context  | `context-stage.ts`                                     | Build or refresh the persisted index, then compile it once into a `PreparedRepositoryIndex`. Failure degrades to diff-only.   |
+| context  | `context-stage.ts`                                     | Build or refresh the persisted index, then compile it once into a `PreparedRepositoryIndex`. Degrades to lexical/diff-only.   |
 | analyze  | `analyze-stage.ts`, `review-file.ts`, `concurrency.ts` | Review eligible files through the worker pool; every file returns a `FileReviewOutcome`.                                      |
 | finalize | `aggregate.ts`, `finalize-stage.ts`                    | Fold outcomes in deterministic order, decide status and summary, build index-only and dry-run results.                        |
 
@@ -304,6 +304,8 @@ Steady state is therefore the metadata, one packed vector array per space, one n
 ## Work, request, and time budgets
 
 `maxFiles` and `maxSegmentsPerFile` bound logical review work. `maxRequests` is a separate atomic allowance enforced immediately before every model attempt or embedding call; retries, indexing batches, and query embeddings all consume it. No new provider call starts after cancellation or exhaustion. The total abort signal covers ingestion, Git/GitHub operations, indexing, embeddings, retrieval, retry waits, and model calls. File-diff ingestion is processed in batches of eight and index reads are sequential.
+
+There is still one cap. `capEmbeddings(allowance)` only bounds how much of it optional embedding work may use: the pipeline sets it to `max(0, maxRequests - plannedSegments)` (zero planned segments for `--index`), so embeddings cannot starve the review. Reaching that ceiling throws a `RequestBudgetError` with `scope: "embedding_allowance"` and is not a provider call. Index embedding failures and query embedding failures of a typed provider or budget kind degrade to lexical retrieval (`context.state: "degraded"`, `context.degradations`, run status `partial`); cancellation and the deadline never do, and no fallback provider call starts after them. A failed index refresh leaves the canonical index and the checkpoint untouched, then the lexical index is built from the same source and published by the normal generation path.
 
 `ExternalRequestBudget` is the one request boundary. Every model attempt (each retry included) and every embedding attempt (each retry included), during indexing or for a query, calls `reserve()` synchronously immediately before the provider is invoked. A reservation either succeeds or throws when the budget is exhausted or the run is aborted. Cache hits never reserve. The budget also keeps the per-kind counts that become `usage.actualRequests` and `usage.embeddingRequests`, so those counters have one source rather than being incremented from concurrent jobs.
 

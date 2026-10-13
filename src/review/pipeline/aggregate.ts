@@ -1,6 +1,7 @@
 import { deduplicateFindings } from "../findings.js";
 import type {
   Coverage,
+  ContextDegradation,
   ContextUse,
   ReviewError,
   ReviewerFinding,
@@ -50,6 +51,8 @@ export type AnalysisSummary = {
   errors: ReviewError[];
   /** File, then segment, then retrieval-rank order (rank is meaningful). */
   selectedContext: ContextUse[];
+  /** Per-segment retrieval degradations, in file then segment order. */
+  degradations: ContextDegradation[];
   usage: UsageDelta;
   coverage: Pick<Coverage, "attempted" | "reviewed" | "failed">;
 };
@@ -80,6 +83,7 @@ export function aggregateOutcomes(
     abstentions: ordered.flatMap((outcome) => outcome.abstentions),
     errors: ordered.flatMap((outcome) => outcome.errors),
     selectedContext: ordered.flatMap((outcome) => outcome.selectedContext),
+    degradations: ordered.flatMap((outcome) => outcome.degradations),
     usage,
     coverage: { attempted, reviewed, failed },
   };

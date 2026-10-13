@@ -63,6 +63,7 @@ const outcome = (
   abstentions: [],
   errors: [],
   selectedContext: [],
+  degradations: [],
   usage: {
     requests: 1,
     attempts: 1,

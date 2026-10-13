@@ -31,6 +31,7 @@ import "./embedding-checkpoint.test.js";
 import "./embedding-errors.test.js";
 import "./embedding-execution.test.js";
 import "./embedding-resilience.test.js";
+import "./hybrid-resilience.test.js";
 import "./index-legacy.test.js";
 import "./vector-format.test.js";
 import "./vector-store.test.js";

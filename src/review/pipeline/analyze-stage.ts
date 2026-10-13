@@ -24,6 +24,7 @@ function unfinishedOutcome(
     abstentions: [],
     errors: [error],
     selectedContext: [],
+    degradations: [],
     usage: emptyUsageDelta(),
   };
 }

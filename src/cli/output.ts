@@ -45,13 +45,27 @@ function sarif(result: ReviewResult) {
               usage: result.usage,
               runId: result.runId,
               context: result.context.state,
+              // Same records as JSON `context.degradations`: codes and counts.
+              contextDegradations: result.context.degradations ?? [],
               abstentions: result.abstentions,
             },
-            toolExecutionNotifications: result.errors.map((error) => ({
-              level: error.fatal ? "error" : "warning",
-              message: { text: `${error.stage}: ${error.message}` },
-              ...(error.code ? { descriptor: { id: error.code } } : {}),
-            })),
+            toolExecutionNotifications: [
+              ...result.errors.map((error) => ({
+                level: error.fatal ? "error" : "warning",
+                message: { text: `${error.stage}: ${error.message}` },
+                ...(error.code ? { descriptor: { id: error.code } } : {}),
+              })),
+              // Coded degradations are already errors above; the rest (for
+              // example embeddings not authorized) must not be dropped.
+              ...(result.context.degradations ?? [])
+                .filter((degradation) => !degradation.code)
+                .map((degradation) => ({
+                  level: "warning",
+                  message: {
+                    text: `${degradation.stage}: ${degradation.message}`,
+                  },
+                })),
+            ],
           },
         ],
         results: result.findings.map((finding) => ({
@@ -99,6 +113,10 @@ export function printReviewResult(
   console.log(
     `Coverage: discovered=${result.coverage.discovered}, eligible=${result.coverage.eligible}, attempted=${result.coverage.attempted}, reviewed=${result.coverage.reviewed}, failed=${result.coverage.failed}, skipped=${result.coverage.skipped}, omitted=${result.coverage.omitted}, truncated=${result.coverage.truncated}`,
   );
+  if (result.context.state === "degraded")
+    console.log(
+      `Context: degraded (${result.context.degradations?.length ?? 0} event(s)); requested semantic context was not fully obtained`,
+    );
   if (result.abstentions.length)
     console.log(`Abstentions: ${result.abstentions.length}`);
   if (result.dryRun)

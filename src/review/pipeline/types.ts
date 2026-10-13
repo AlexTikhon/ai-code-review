@@ -6,6 +6,7 @@ import type { EmbeddingExecutionOptions } from "../../retrieval/embedding-execut
 import type { EmbeddingAdapter } from "../../retrieval/embeddings.js";
 import type { GithubRequesterOptions } from "../../review-sources/github/client.js";
 import type {
+  ContextDegradation,
   ContextMode,
   ContextUse,
   ReviewError,
@@ -107,5 +108,7 @@ export type FileReviewOutcome = {
   abstentions: Abstention[];
   errors: ReviewError[];
   selectedContext: ContextUse[];
+  /** Segments whose requested semantic retrieval was not obtained. */
+  degradations: ContextDegradation[];
   usage: UsageDelta;
 };

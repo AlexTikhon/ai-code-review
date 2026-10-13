@@ -3,7 +3,7 @@ import type { EmbeddingErrorCode } from "../retrieval/embedding-errors.js";
 import type { SourceErrorCode, SourceName } from "../review-sources/errors.js";
 import type { RepositoryContextIdentity } from "./context-identity.js";
 
-export const RESULT_SCHEMA_VERSION = "1.4.0";
+export const RESULT_SCHEMA_VERSION = "1.5.0";
 export const PROMPT_VERSION = "3.0.0";
 export const POLICY_VERSION = "1.1.0";
 
@@ -181,6 +181,28 @@ export type ContextUse = {
   startLine: number;
   endLine: number;
 };
+/**
+ * Requested semantic context that was not obtained while review continued on
+ * lexical/symbol evidence. Counts and codes only: never query text, vectors or
+ * provider response bodies.
+ */
+export type ContextDegradation = {
+  stage: "index" | "retrieve";
+  /**
+   * `embedding_withheld`: no embedding call was made because the request
+   * allowance, or the authorization, did not permit it.
+   * `embedding_failed`: an embedding call was made and failed.
+   */
+  reason: "embedding_withheld" | "embedding_failed";
+  /** The stable code of the underlying failure, when there was one. */
+  code?: ReviewErrorCode;
+  provider?: string;
+  retryable?: boolean;
+  /** Set for per-segment retrieval degradations. */
+  filename?: string;
+  segmentId?: string;
+  message: string;
+};
 export type ReviewResult = {
   schemaVersion: typeof RESULT_SCHEMA_VERSION;
   runId: string;
@@ -198,9 +220,14 @@ export type ReviewResult = {
   usage: Usage;
   context: {
     mode: ContextMode;
-    state: "used" | "unavailable" | "stale" | "disabled";
+    /**
+     * `degraded`: repository context was used, but requested semantic context
+     * was not fully obtained (see `degradations`). The run is never `complete`.
+     */
+    state: "used" | "degraded" | "unavailable" | "stale" | "disabled";
     selected: ContextUse[];
     message?: string;
+    degradations?: ContextDegradation[];
   };
   model: { provider: string; name: string; promptVersion: string };
   policyVersion: string;

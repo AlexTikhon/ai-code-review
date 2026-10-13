@@ -657,7 +657,8 @@ unitTest(
     const first = await hybridRun(root, failing.adapter, events);
     // 80 vectors in batches of 32: two paid batches, the third fails.
     assert.equal(first.usage.embeddingRequests, 3);
-    assert.equal(first.context.state, "unavailable");
+    assert.equal(first.context.state, "degraded");
+    assert.equal(first.status, "partial");
     assert.equal(first.errors[0]?.stage, "index");
     assert.equal(
       Object.keys((await readCheckpoint(checkpoint)).vectors).length,

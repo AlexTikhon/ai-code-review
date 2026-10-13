@@ -440,7 +440,9 @@ unitTest(
       root,
       scriptedEmbedding({ 1: unauthorized() }).adapter,
     );
-    assert.equal(result.context.state, "unavailable");
+    // Review continues on the lexical index; the failure is not hidden.
+    assert.equal(result.context.state, "degraded");
+    assert.equal(result.status, "partial");
     const error = result.errors[0];
     assert.equal(error?.stage, "index");
     assert.equal(error?.code, "EMBEDDING_AUTHENTICATION");
@@ -477,9 +479,11 @@ unitTest(
         Array.from({ length: 20 }, (_, i) => [i + 1, unavailable()]),
       ),
     );
+    // One request per planned segment stays reserved for the model review,
+    // so a cap of 3 leaves exactly two embedding attempts.
     const result = await hybridRun(root, failing.adapter, [], {
       ...hybridConfig,
-      maxRequests: 2,
+      maxRequests: 3,
     });
     assert.equal(result.errors[0]?.code, "REQUEST_BUDGET_EXHAUSTED");
     assert.equal(result.errors[0]?.retryable, false);
@@ -489,7 +493,7 @@ unitTest(
 );
 
 unitTest(
-  "a query-embedding failure fails the segment with a retrieve-stage embedding code",
+  "a query-embedding failure is reported with a retrieve-stage embedding code and review continues",
   async () => {
     const root = await repo(sources(4));
     // 8 vectors fit one index batch (attempt 1); the query is attempt 2.
@@ -518,8 +522,9 @@ unitTest(
     assert.ok(error, JSON.stringify(result.errors));
     assert.equal(error.stage, "retrieve");
     assert.equal(error.provider, "fake");
-    assert.equal(modelCalls, 0, "the model is not asked with missing evidence");
-    assert.notEqual(result.status, "complete");
+    assert.equal(modelCalls, 1, "the model reviews with lexical evidence");
+    assert.equal(result.context.state, "degraded");
+    assert.equal(result.status, "partial", "never a full hybrid success");
   },
 );
 
@@ -612,7 +617,7 @@ unitTest(
       }) as unknown as typeof fetch,
     );
     const result = await hybridRun(root, adapter);
-    assert.equal(result.context.state, "unavailable");
+    assert.equal(result.context.state, "degraded");
     assert.equal(result.errors[0]?.code, "EMBEDDING_AUTHENTICATION");
     assert.equal(result.errors[0]?.retryable, false);
     assert.equal(fetches, 0);

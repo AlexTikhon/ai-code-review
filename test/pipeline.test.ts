@@ -454,7 +454,15 @@ unitTest(
       provider: "test",
       async review() {
         modelCalls++;
-        throw new Error("model should not fit in the budget");
+        return {
+          response: {
+            findings: [],
+            summary: "clean fixture",
+            abstained: false,
+            abstentionReason: null,
+          },
+          usage: { inputTokens: 1, outputTokens: 1, actual: true },
+        };
       },
     };
     const reviewSource = {
@@ -475,15 +483,23 @@ unitTest(
       {
         model,
         embedding,
-        config: { ...config, maxRequests: 1 },
+        // One request is kept for the single planned segment; the one spare
+        // request is the only one embeddings may use, and it is still counted
+        // in the same allowance.
+        config: { ...config, maxRequests: 2 },
         source: reviewSource,
       },
     );
-    assert.equal(embeddingCalls, 1);
-    assert.equal(modelCalls, 0);
+    assert.equal(embeddingCalls, 1, "index batch only; the query is withheld");
+    assert.equal(modelCalls, 1, "the review is not starved by embeddings");
     assert.equal(result.usage.embeddingRequests, 1);
-    assert.equal(result.usage.actualRequests, 1);
-    assert.equal(result.status, "failed");
+    assert.equal(result.usage.actualRequests, 2);
+    assert.equal(
+      result.status,
+      "partial",
+      "withheld semantic query is reported",
+    );
+    assert.equal(result.context.state, "degraded");
 
     const dry = await runReviewPipeline(
       { ...args, contextMode: "hybrid", dryRun: true },
@@ -496,7 +512,7 @@ unitTest(
     );
     assert.equal(dry.usage.actualRequests, 0);
     assert.equal(embeddingCalls, 1);
-    assert.equal(modelCalls, 0);
+    assert.equal(modelCalls, 1);
   },
 );
 

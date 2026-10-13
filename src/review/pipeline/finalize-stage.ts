@@ -18,6 +18,9 @@ import type { PipelineContext } from "./types.js";
 
 type FilterSuccess = Extract<FilterOutcome, { ok: true }>;
 
+const DEGRADED_NOTE =
+  " Requested semantic context was not fully obtained and lexical retrieval was used; see context.degradations.";
+
 /**
  * Fold the ingest, filter and context stages into the result every later
  * outcome (index-only, dry-run, full review) is derived from.
@@ -50,11 +53,20 @@ export function finalizeIndexOnly(
   context: ContextOutcome,
 ): ReviewResult {
   const indexed = Boolean(context.prepared);
+  const degraded = result.context.state === "degraded";
   return {
     ...result,
-    status: indexed || result.context.mode === "diff" ? "complete" : "failed",
+    // A lexical-only index when embeddings were requested is not the index
+    // that was asked for.
+    status: indexed
+      ? degraded
+        ? "partial"
+        : "complete"
+      : result.context.mode === "diff"
+        ? "complete"
+        : "failed",
     summary: indexed
-      ? `Indexed ${context.chunkCount} repository context chunks at ${context.indexLocation}.`
+      ? `Indexed ${context.chunkCount} repository context chunks at ${context.indexLocation}.${degraded ? DEGRADED_NOTE : ""}`
       : "No index was created.",
   };
 }
@@ -108,7 +120,7 @@ export function finalizeDryRun(
     source,
     files,
     ctx.config,
-    result.context.state === "used",
+    result.context.state === "used" || result.context.state === "degraded",
   );
   const estimatedInputTokens = proposed.reduce(
     (sum, item) => sum + item.estimatedInputTokens,
@@ -154,11 +166,22 @@ export function finalizeReview(
   analysis: AnalysisSummary,
 ): ReviewResult {
   const coverage = { ...result.coverage, ...analysis.coverage };
+  // Context requested at index time or lost per segment: either way the
+  // evidence differs from what the mode asked for, so the run is never clean.
+  const contextState: ReviewResult["context"]["state"] =
+    result.context.state === "used" && analysis.degradations.length > 0
+      ? "degraded"
+      : result.context.state;
+  const degradations = [
+    ...(result.context.degradations ?? []),
+    ...analysis.degradations,
+  ];
   const incomplete =
     !source.coverageComplete ||
     coverage.failed > 0 ||
     coverage.omitted > 0 ||
     coverage.truncated > 0 ||
+    contextState === "degraded" ||
     (result.context.mode !== "diff" && result.context.state === "unavailable");
   const status: ReviewResult["status"] =
     coverage.eligible > 0 && coverage.reviewed === 0
@@ -175,7 +198,19 @@ export function finalizeReview(
     errors: [...result.errors, ...analysis.errors],
     context: {
       ...result.context,
+      state: contextState,
       selected: [...result.context.selected, ...analysis.selectedContext],
+      ...(analysis.degradations.length
+        ? {
+            message: [
+              result.context.message,
+              `Semantic retrieval was not obtained for ${analysis.degradations.length} segment(s); lexical retrieval was used for them.`,
+            ]
+              .filter(Boolean)
+              .join(" "),
+          }
+        : {}),
+      ...(degradations.length ? { degradations } : {}),
     },
     usage: { ...result.usage, ...analysis.usage },
     summary: "",
@@ -199,7 +234,7 @@ export function finalizeReview(
     };
   return {
     ...merged,
-    summary: `${status === "complete" ? "Review complete" : "Review partial"}: reviewed ${coverage.reviewed}/${coverage.eligible} eligible file(s), found ${analysis.findings.length} validated issue(s), intentionally skipped ${coverage.skipped}, omitted ${coverage.omitted}, truncated ${coverage.truncated}.`,
+    summary: `${status === "complete" ? "Review complete" : "Review partial"}: reviewed ${coverage.reviewed}/${coverage.eligible} eligible file(s), found ${analysis.findings.length} validated issue(s), intentionally skipped ${coverage.skipped}, omitted ${coverage.omitted}, truncated ${coverage.truncated}.${contextState === "degraded" ? DEGRADED_NOTE : ""}`,
   };
 }
 

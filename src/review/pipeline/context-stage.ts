@@ -10,9 +10,18 @@ import {
 } from "../../retrieval/prepared-index.js";
 import { contextRepositoryId } from "../context-identity.js";
 import type { LoadedIgnore } from "../ignore.js";
-import type { ReviewError, ReviewResult, ReviewSource } from "../types.js";
+import type {
+  ContextDegradation,
+  ReviewError,
+  ReviewResult,
+  ReviewSource,
+} from "../types.js";
 import { embeddingExecutionFor } from "./embedding-execution.js";
-import { contextFailure } from "./analysis-errors.js";
+import {
+  contextFailure,
+  degradationError,
+  embeddingDegradation,
+} from "./analysis-errors.js";
 import { errorMessage } from "./result.js";
 import type { PipelineContext } from "./types.js";
 
@@ -28,12 +37,21 @@ export type ContextOutcome = {
   errors: ReviewError[];
 };
 
-/** Stage 3: build/refresh the repository index and compile it for retrieval. */
+/**
+ * Stage 3: build/refresh the repository index and compile it for retrieval.
+ *
+ * Embeddings are optional work that shares the one request cap with model
+ * review, so they are bounded to what `modelRequestsToProtect` leaves free
+ * (one request per planned review segment). When they cannot be made, or fail
+ * while the run is still active, the stage builds the lexical index and says
+ * so in `context.degradations`; it never silently reports hybrid success.
+ */
 export async function contextStage(
   ctx: PipelineContext,
   source: ReviewSource,
   policy: LoadedIgnore,
   blockedPaths: readonly string[] = [],
+  modelRequestsToProtect = 0,
 ): Promise<ContextOutcome> {
   const { contextMode } = ctx.request;
   if (contextMode === "diff")
@@ -55,11 +73,52 @@ export async function contextStage(
 
   const started = ctx.now();
   const hybrid = contextMode === "hybrid";
-  const embedding = hybrid ? ctx.embedding : undefined;
+  // A dry run reads the index but never calls a provider.
+  const live = !ctx.request.dryRun;
+  const allowance = Math.max(
+    0,
+    ctx.config.maxRequests - modelRequestsToProtect,
+  );
+  if (hybrid && live) ctx.budget.capEmbeddings(allowance);
+  let embedding = hybrid ? ctx.embedding : undefined;
   const diagnostics: string[] = [];
-  try {
-    const { index, stats, loaded } = await refreshRepositoryIndex({
-      root: source.repositoryRoot,
+  const degradations: ContextDegradation[] = [];
+  const errors: ReviewError[] = [];
+  const degrade = (degradation: ContextDegradation) => {
+    degradations.push(degradation);
+    emitEvent(ctx.events, ctx.runId, "index", "warning", {
+      message: `context_degraded:${degradation.reason}`,
+      data: {
+        stage: degradation.stage,
+        ...(degradation.code ? { code: degradation.code } : {}),
+      },
+    });
+    // A coded degradation is also a non-fatal error, so consumers that only
+    // read notifications still see it; the authorization case has no code.
+    if (degradation.code) errors.push(degradationError(degradation));
+  };
+  if (hybrid && !ctx.embedding)
+    degrade({
+      stage: "index",
+      reason: "embedding_withheld",
+      message:
+        "Semantic embeddings were not permitted; lexical/symbol retrieval was used.",
+    });
+  else if (hybrid && live && embedding && allowance === 0) {
+    // Withheld before any call: nothing is counted as a provider request.
+    degrade({
+      stage: "index",
+      reason: "embedding_withheld",
+      code: "REQUEST_BUDGET_EXHAUSTED",
+      retryable: false,
+      message:
+        "Embedding work was withheld: the whole request budget is reserved for model review; lexical retrieval was used.",
+    });
+    embedding = undefined;
+  }
+  const refresh = (withEmbedding: EmbeddingAdapter | undefined) =>
+    refreshRepositoryIndex({
+      root: source.repositoryRoot!,
       repositoryId: contextRepositoryId(source),
       revision: source.snapshotId,
       gitRevision: source.mode === "pr" ? source.headRevision : undefined,
@@ -67,7 +126,7 @@ export async function contextStage(
       maxChunkTokens: Math.min(ctx.config.maxContextTokens, 800),
       ignorePolicy: policy,
       excludePaths: new Set(blockedPaths),
-      embedding: hybrid && !ctx.request.dryRun ? embedding : undefined,
+      embedding: hybrid && live ? withEmbedding : undefined,
       signal: ctx.signal,
       beforeEmbeddingRequest: () => ctx.budget.reserve("embedding"),
       embeddingExecution: embeddingExecutionFor(ctx),
@@ -93,13 +152,28 @@ export async function contextStage(
           { message: type, data },
         ),
     });
+  try {
+    let refreshed: Awaited<ReturnType<typeof refresh>>;
+    try {
+      refreshed = await refresh(embedding);
+    } catch (error) {
+      // Provider failure or request cap while the run is active: the failed
+      // attempt left the canonical index and the checkpoint as they were, so
+      // the lexical index can be built and published from the same source.
+      // Cancellation and the deadline are not degradable and propagate.
+      const degradation =
+        embedding && live
+          ? embeddingDegradation("index", error, ctx.signal, undefined)
+          : undefined;
+      if (!degradation) throw error;
+      degrade(degradation);
+      embedding = undefined;
+      refreshed = await refresh(undefined);
+    }
+    const { index, stats, loaded } = refreshed;
     const prepared = prepareRepositoryIndex(index);
     const messages = [
-      ...(hybrid && !embedding
-        ? [
-            "Semantic embeddings were not permitted; lexical/symbol retrieval was used.",
-          ]
-        : []),
+      ...degradations.map((degradation) => degradation.message),
       ...diagnostics,
     ];
     emitEvent(ctx.events, ctx.runId, "index", "complete", {
@@ -131,15 +205,16 @@ export async function contextStage(
     return {
       context: {
         mode: contextMode,
-        state: "used",
+        state: degradations.length ? "degraded" : "used",
         selected: [],
         ...(messages.length ? { message: messages.join(" ") } : {}),
+        ...(degradations.length ? { degradations } : {}),
       },
       prepared,
       embedding,
       indexLocation: indexPath(source.repositoryRoot, ctx.config.cacheDirName),
       chunkCount: index.chunks.length,
-      errors: [],
+      errors,
     };
   } catch (error) {
     const message = `Repository context unavailable: ${errorMessage(error)}; using diff-only review.`;
@@ -154,7 +229,7 @@ export async function contextStage(
         selected: [],
         message,
       },
-      errors: [contextFailure(error, message)],
+      errors: [...errors, contextFailure(error, message)],
     };
   }
 }

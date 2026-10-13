@@ -10,11 +10,12 @@ import { emitEvent } from "../../observability/events.js";
 import { assembleReviewPrompt } from "../../prompts/review.js";
 import type { EmbeddingAdapter } from "../../retrieval/embeddings.js";
 import type { PreparedRepositoryIndex } from "../../retrieval/prepared-index.js";
-import { retrieveContext } from "../../retrieval/retrieve.js";
+import { retrieveContextDetailed } from "../../retrieval/retrieve.js";
 import type { RetrievalCandidate } from "../../retrieval/types.js";
 import { contextRepositoryId } from "../context-identity.js";
 import { deduplicateFindings, validateFindings } from "../findings.js";
 import type {
+  ContextDegradation,
   ContextUse,
   PatchSegment,
   ReviewError,
@@ -25,6 +26,8 @@ import type {
 import { embeddingExecutionFor } from "./embedding-execution.js";
 import { addUsage, emptyUsageDelta } from "./aggregate.js";
 import {
+  degradationError,
+  embeddingDegradation,
   invalidEvidenceFailure,
   modelFailure,
   unexpectedFailure,
@@ -49,6 +52,8 @@ export type FileJob = {
 type SegmentOutcome = {
   /** Context is reported even when the segment later fails. */
   selectedContext: ContextUse[];
+  /** Semantic retrieval that was requested for this segment but not obtained. */
+  degradations: ContextDegradation[];
   usage: UsageDelta;
 } & (
   | {
@@ -80,12 +85,15 @@ async function reviewSegment(
   const { source, file } = job;
   let usage = emptyUsageDelta();
   let selectedContext: ContextUse[] = [];
+  const degradations: ContextDegradation[] = [];
   try {
     ctx.signal.throwIfAborted();
     let candidates: RetrievalCandidate[] = [];
     if (job.prepared && ctx.request.contextMode !== "diff") {
       const retrievalStarted = ctx.now();
-      candidates = await retrieveContext({
+      // A failed query embedding keeps the lexical candidates; cancellation
+      // and untyped failures still throw to the classification below.
+      const retrieved = await retrieveContextDetailed({
         index: job.prepared,
         repositoryId: contextRepositoryId(source),
         revision: source.snapshotId,
@@ -101,6 +109,27 @@ async function reviewSegment(
         beforeEmbeddingRequest: () => ctx.budget.reserve("embedding"),
         embeddingExecution: embeddingExecutionFor(ctx),
       });
+      candidates = retrieved.candidates;
+      if (retrieved.semanticFailure) {
+        const degradation = embeddingDegradation(
+          "retrieve",
+          retrieved.semanticFailure,
+          ctx.signal,
+          { filename: file.filename, segmentId: segment.id },
+        );
+        // Only a degradable failure is returned, so this is always present.
+        if (degradation) {
+          degradations.push(degradation);
+          emitEvent(ctx.events, ctx.runId, "retrieve", "warning", {
+            filename: file.filename,
+            message: `context_degraded:${degradation.reason}`,
+            data: {
+              segment: segment.id,
+              ...(degradation.code ? { code: degradation.code } : {}),
+            },
+          });
+        }
+      }
       emitEvent(ctx.events, ctx.runId, "retrieve", "complete", {
         filename: file.filename,
         durationMs: ctx.now() - retrievalStarted,
@@ -186,7 +215,7 @@ async function reviewSegment(
           executed.error instanceof ReviewModelError
             ? modelFailure(file.filename, executed.error)
             : unexpectedFailure(file.filename, executed.error, false);
-        return { ...failure, selectedContext, usage };
+        return { ...failure, selectedContext, usage, degradations };
       }
       modelResult = executed.result;
       // Tokens were spent whether or not the evidence turns out to be usable.
@@ -217,6 +246,7 @@ async function reviewSegment(
           ),
           selectedContext,
           usage,
+          degradations,
         };
       if (root) {
         try {
@@ -243,6 +273,7 @@ async function reviewSegment(
         : undefined,
       selectedContext,
       usage,
+      degradations,
     };
   } catch (error) {
     // Anything not already classified above: budget, prompt assembly,
@@ -251,6 +282,7 @@ async function reviewSegment(
       ...unexpectedFailure(file.filename, error, ctx.signal.aborted),
       selectedContext,
       usage,
+      degradations,
     };
   }
 }
@@ -270,17 +302,23 @@ export async function reviewFile(
   const abstentions: Abstention[] = [];
   const errors: ReviewError[] = [];
   const selectedContext: ContextUse[] = [];
+  const degradations: ContextDegradation[] = [];
   let usage = emptyUsageDelta();
   let completedSegments = 0;
   let failed = false;
   let failureStatus: SegmentStatus = "success";
+  let failureCode: string | undefined;
   for (const segment of file.segments) {
     const outcome = await reviewSegment(ctx, job, segment);
     usage = addUsage(usage, outcome.usage);
     selectedContext.push(...outcome.selectedContext);
+    degradations.push(...outcome.degradations);
+    for (const degradation of outcome.degradations)
+      if (degradation.code) errors.push(degradationError(degradation));
     if (outcome.status !== "success") {
       errors.push(outcome.error);
       failureStatus = outcome.status;
+      failureCode = outcome.error.code;
       failed = true;
       break;
     }
@@ -298,9 +336,10 @@ export async function reviewFile(
       cacheHits: usage.cacheHits,
       attempts: usage.attempts,
       contexts: selectedContext.length,
+      degraded: degradations.length,
       failed,
       outcome: failureStatus,
-      ...(errors[0]?.code ? { code: errors[0].code } : {}),
+      ...(failureCode ? { code: failureCode } : {}),
     },
   });
   return {
@@ -314,6 +353,7 @@ export async function reviewFile(
     abstentions,
     errors,
     selectedContext,
+    degradations,
     usage,
   };
 }
