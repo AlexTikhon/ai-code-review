@@ -4,6 +4,8 @@ A privacy-conscious TypeScript CLI for reviewing GitHub pull-request diffs or lo
 
 This is an engineering baseline, not a claim that model findings are correct or that the privacy heuristics detect every secret.
 
+Development is paused at the verified local baseline dated 2026-11-03. See the [pause handoff](docs/PAUSE_HANDOFF.md) for the architecture review, evidence, limitations, and resume procedure.
+
 ## Pipeline and modes
 
 The source-neutral pipeline is `ingest → filter/policy → repository context → analyze → finalize`; each stage is a separate module described in [architecture decisions](docs/ARCHITECTURE.md). The repository index is updated incrementally: unchanged files reuse their chunks and embeddings, and only changed files are re-read and re-chunked. A corrupt or incompatible index cache is validated, rebuilt from source, and reported in `context.message` rather than trusted. Embedding vectors are stored in a compact binary file next to a small JSON metadata file, and an index is published as a complete generation (the manifest is replaced last), so a crash can never expose a half-written index; an index in the previous all-JSON format is upgraded in place without re-embedding. Paid embedding work survives a failed or cancelled run in a separate checkpoint (the canonical index is still only ever replaced whole), so a retry requests just the missing vectors. `npm run bench` prints a local lexical-retrieval, exact semantic-search, persistence and incremental-index benchmark (`npm run bench:persistence` runs the full persistence comparison up to 100,000 vectors).
@@ -24,13 +26,11 @@ Requires Node.js 20+ and Git.
 
 ```bash
 npm ci
-npm run typecheck
-npm run build
-npm test
-npm run eval
+npm run verify:offline
+npm audit --audit-level=high
 ```
 
-Help, dry-run, index construction, tests, and deterministic evaluation require no provider key and make no provider calls.
+Help, dry-run, lexical index construction, tests, and deterministic evaluation require no provider key and make no provider calls. Hybrid index construction can call the embedding provider when separately authorized.
 
 ## Privacy and transmission policy
 
@@ -95,7 +95,7 @@ Statuses:
 
 Coverage fields have documented definitions in the JSON schema/type: `discovered`, `eligible`, `attempted`, `reviewed`, `failed`, `skipped`, `omitted`, and `truncated`. `skipped` is an intentional policy exclusion; `omitted` is eligible input lost to a missing patch or work limit. A failed or wholly unreviewed eligible input is never called clean.
 
-Exit codes are `0` for a complete result below the configured finding threshold, `1` for a complete result meeting/exceeding the threshold, `2` for failed/partial operational or incomplete review, and `64` for CLI usage errors. Dry-run/index return `0` unless their operation fails.
+Exit codes are `0` for a complete result below the configured finding threshold, `1` for a complete result meeting/exceeding the threshold, `2` for failed/partial operational or incomplete review, and `64` for CLI usage errors. Index-only uses the same complete/partial/failed rule: a lexical-only index when hybrid was requested exits `2`. A successful dry-run manifest returns `0` even though its review status is `partial`; a failed dry run returns `2`. If both operation flags are present, index-only takes precedence.
 
 JSON uses schema version `1.5.0` (1.5.0 adds the `context.state` value `degraded` and optional `context.degradations`, whose entries carry only a stage, a reason, a stable code and counts; 1.4.0 adds `contextTokenBound`, `inputTokenBound` and `estimateBasis` to the dry-run manifest, and `estimatedInputTokens` there now covers the full mandatory request; 1.2.0 added optional `code`, `provider` and `retryable` to each error; 1.3.0 adds ingestion codes such as `GITHUB_RATE_LIMIT`, `GITHUB_REVISION_CHANGED` and `GIT_NOT_A_REPOSITORY`, plus an optional `source` of `github` or `git`). `retryable` tells CI whether re-running could succeed. SARIF 2.1.0 includes the same status, coverage, usage, stable finding fingerprints, validated locations, and operational notifications. Machine-readable stdout contains only the report; progress/events go to stderr.
 

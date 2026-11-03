@@ -42,6 +42,7 @@ import "./index-store-structure.test.js";
 import "./anthropic-model.test.js";
 import "./model-errors.test.js";
 import "./failure-semantics.test.js";
+import "./finalization.test.js";
 import "./prompt-estimate.test.js";
 import "./request-planning.test.js";
 import "./provider-composition.test.js";

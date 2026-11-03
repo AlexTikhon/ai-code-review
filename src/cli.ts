@@ -28,7 +28,7 @@ async function main(): Promise<void> {
   const result = await runReview(args, { events: stderrEvent });
   printReviewResult(result, args.format);
   process.exitCode =
-    args.dryRun || args.indexOnly
+    args.dryRun && !args.indexOnly
       ? result.status === "failed"
         ? 2
         : 0

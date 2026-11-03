@@ -218,9 +218,10 @@ export function finalizeReview(
   if (coverage.discovered === 0)
     return {
       ...merged,
-      status: "complete",
       summary:
-        "No changed files were discovered; no clean-code claim was made.",
+        status === "complete"
+          ? "No changed files were discovered; no clean-code claim was made."
+          : "No changed files were discovered, but source or requested context coverage is incomplete; no clean-code claim was made.",
     };
   if (coverage.eligible === 0)
     return {

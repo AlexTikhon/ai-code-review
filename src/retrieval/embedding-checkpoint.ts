@@ -51,7 +51,7 @@ export type CheckpointEvent =
 const checkpointSchema = z
   .object({
     schemaVersion: z.literal(CHECKPOINT_SCHEMA_VERSION),
-    vectors: z.record(vectorSchema),
+    vectors: z.record(z.string(), vectorSchema),
   })
   .superRefine((checkpoint, context) => {
     for (const [key, vector] of Object.entries(checkpoint.vectors))

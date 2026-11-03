@@ -269,10 +269,7 @@ export type Manifest = z.infer<typeof manifestSchema>;
 export type ParseResult<T> =
   { ok: true; value: T } | { ok: false; reason: string };
 
-function parseWith<T>(
-  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
-  raw: unknown,
-): ParseResult<T> {
+function parseWith<T>(schema: z.ZodType<T>, raw: unknown): ParseResult<T> {
   const parsed = schema.safeParse(raw);
   if (parsed.success) return { ok: true, value: parsed.data };
   const issue = parsed.error.issues[0];

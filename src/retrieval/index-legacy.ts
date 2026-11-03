@@ -68,7 +68,7 @@ export const legacyIndexSchema = z
     createdAt: z.string(),
     files: z.array(fileSchema),
     chunks: z.array(chunkSchema),
-    vectors: z.record(vectorSchema),
+    vectors: z.record(z.string(), vectorSchema),
   })
   .superRefine((index, context) => {
     for (const issue of indexStructureIssues(index))
