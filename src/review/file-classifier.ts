@@ -1,7 +1,6 @@
 import type { ReviewedFileType } from "./types.js";
 
 const LOCKFILE_NAMES = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
-const GENERATED_PATTERNS = [".snap", "dist/", "build/", ".next/", "coverage/"];
 const SOURCE_EXTENSIONS = new Set([
   ".ts",
   ".tsx",
@@ -74,7 +73,7 @@ export function classifyFile(filename: string): ReviewedFileType {
     return "lockfile";
   }
 
-  if (GENERATED_PATTERNS.some((pattern) => normalized.includes(pattern))) {
+  if (isGeneratedOrVendorPath(normalized) || /\.snap$/i.test(basename)) {
     return "generated";
   }
 
@@ -119,7 +118,7 @@ const MINIFIED = /\.min\.[cm]?js$/i;
 
 /**
  * True for generated or vendored files that must not become repository
- * context. Matches whole path components (so `src/node_modules-helper.ts` and
+ * diffs or context. Matches whole path components (so `src/node_modules-helper.ts` and
  * `src/dist.ts` are ordinary) and is independent of any user ignore rule.
  */
 export function isGeneratedOrVendorPath(path: string): boolean {
