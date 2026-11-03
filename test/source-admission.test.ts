@@ -102,6 +102,76 @@ const config = { ...testConfig, maxRequests: 50 };
 const skippedReason = (result: ReviewResult, filename: string) =>
   result.skippedFiles.find((file) => file.filename === filename)?.reason;
 
+/* ---- repository filenames are literal paths, never Git pathspecs ---- */
+
+for (const [filename, excluded, reason] of [
+  ["[s]ecret.ts", "secret.ts", "ignored_by_user"],
+  ["[.]env.ts", ".env.ts", "sensitive_path"],
+] as const) {
+  async function pathspecRepo() {
+    const root = await committed({
+      [filename]: OK_FILE,
+      [excluded]: "export const before = 1;\n",
+      ".ai-reviewer-ignore": "secret.ts\n",
+    });
+    await put(root, filename, "export function ok() { return 200; }\n");
+    await put(root, excluded, PRIVATE_FILE);
+    return root;
+  }
+
+  unitTest(
+    `literal pathspec collection of ${filename} cannot read excluded ${excluded}`,
+    async () => {
+      const root = await pathspecRepo();
+      const policy = await loadIgnorePolicy(root);
+      const source = await getLocalDiff(undefined, root, {
+        pathAllowed: (path) =>
+          !isMandatorySensitivePath(path) && !isIgnoredPath(path, policy),
+      });
+      const admitted = source.files.find((file) => file.filename === filename);
+      assert.ok(admitted?.patch, "the literal file is still reviewed");
+      assert.match(admitted.patch, /return 200/);
+      assert.equal(admitted.additions, 1);
+      assert.equal(admitted.deletions, 1);
+      assert.equal(
+        admitted.patch
+          .split("\n")
+          .filter((line) => line.startsWith("diff --git ")).length,
+        1,
+        "one admission decision must collect exactly one file",
+      );
+      assert.equal(
+        source.files.find((file) => file.filename === excluded)?.patch,
+        undefined,
+      );
+      assert.ok(!JSON.stringify(source).includes(PRIVATE));
+    },
+  );
+
+  for (const contextMode of ["diff", "hybrid"] as const)
+    unitTest(
+      `literal pathspec ${filename} keeps excluded bytes out of ${contextMode} review`,
+      async () => {
+        const root = await pathspecRepo();
+        const probe = recorders();
+        const result = await executeReviewPipeline(
+          localRequest(root, { contextMode }),
+          config,
+          { model: probe.model, embedding: probe.embedding },
+        );
+        assert.equal(result.status, "complete");
+        assert.equal(result.coverage.reviewed, 1);
+        assert.equal(skippedReason(result, excluded), reason);
+        assert.deepEqual(probe.reviewed, [filename]);
+        assert.ok(
+          !JSON.stringify([result, probe.prompts, probe.texts]).includes(
+            PRIVATE,
+          ),
+        );
+      },
+    );
+}
+
 /* ---- original and destination paths ---- */
 
 unitTest("privacy evaluation checks the rename or copy origin", () => {

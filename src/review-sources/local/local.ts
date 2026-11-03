@@ -61,13 +61,20 @@ async function runGitRaw(
   cwd: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    maxBuffer: 20 * 1024 * 1024,
-    encoding: "utf8",
-    env: { ...process.env, GIT_EXTERNAL_DIFF: "", GIT_DIFF_OPTS: "" },
-    signal,
-  });
+  // Paths returned by Git are untrusted filenames, not pathspec expressions.
+  // `--` stops option parsing but still permits glob/magic expansion, which
+  // could pull a refused sibling's diff into an admitted file's patch.
+  const { stdout } = await execFileAsync(
+    "git",
+    ["--literal-pathspecs", ...args],
+    {
+      cwd,
+      maxBuffer: 20 * 1024 * 1024,
+      encoding: "utf8",
+      env: { ...process.env, GIT_EXTERNAL_DIFF: "", GIT_DIFF_OPTS: "" },
+      signal,
+    },
+  );
   return stdout;
 }
 async function runGit(
